@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -145,95 +144,6 @@ static esp_err_t max30102_read_fifo_sample(uint32_t *red, uint32_t *ir)
     return ESP_OK;
 }
 
-/* ---------- HEART RATE ESTIMATION (simple peak detection on IR AC component) ---------- */
-typedef struct {
-    float dc_ema;
-    float abs_ema;
-    float thresh;
-
-    bool in_peak;
-    float peak_max;
-    int64_t peak_time_ms;
-    int64_t last_beat_ms;
-
-    int bpm;
-    int bpm_hist[8];
-    int bpm_hist_len;
-    int bpm_hist_idx;
-    int avg_bpm;
-} hr_state_t;
-
-static void hr_init(hr_state_t *s, uint32_t ir0)
-{
-    memset(s, 0, sizeof(*s));
-    s->dc_ema = (float)ir0;
-    s->abs_ema = 0.0f;
-    s->thresh = 200.0f; /* small starting threshold; will adapt */
-    s->last_beat_ms = -1;
-}
-
-static void hr_push_bpm(hr_state_t *s, int bpm)
-{
-    if (bpm <= 0) return;
-    s->bpm_hist[s->bpm_hist_idx] = bpm;
-    s->bpm_hist_idx = (s->bpm_hist_idx + 1) % (int)(sizeof(s->bpm_hist) / sizeof(s->bpm_hist[0]));
-    if (s->bpm_hist_len < (int)(sizeof(s->bpm_hist) / sizeof(s->bpm_hist[0]))) {
-        s->bpm_hist_len++;
-    }
-
-    int sum = 0;
-    for (int i = 0; i < s->bpm_hist_len; i++) sum += s->bpm_hist[i];
-    s->avg_bpm = (s->bpm_hist_len > 0) ? (sum / s->bpm_hist_len) : 0;
-}
-
-static void hr_update(hr_state_t *s, uint32_t ir, int64_t t_ms)
-{
-    /* For ~20 Hz updates: fairly quick DC tracking, moderate envelope tracking */
-    const float alpha_dc = 0.05f;
-    const float alpha_abs = 0.10f;
-    const int64_t refractory_ms = 300; /* prevent double-beat detection */
-
-    s->dc_ema += alpha_dc * ((float)ir - s->dc_ema);
-    float ac = (float)ir - s->dc_ema;
-
-    float abs_ac = fabsf(ac);
-    s->abs_ema += alpha_abs * (abs_ac - s->abs_ema);
-
-    /* Dynamic threshold with floor */
-    float dyn = s->abs_ema * 1.5f;
-    if (dyn < 200.0f) dyn = 200.0f;
-    s->thresh = dyn;
-
-    bool refractory_ok = (s->last_beat_ms < 0) || ((t_ms - s->last_beat_ms) > refractory_ms);
-
-    if (!s->in_peak) {
-        if (refractory_ok && ac > s->thresh) {
-            s->in_peak = true;
-            s->peak_max = ac;
-            s->peak_time_ms = t_ms;
-        }
-    } else {
-        if (ac > s->peak_max) {
-            s->peak_max = ac;
-            s->peak_time_ms = t_ms;
-        }
-
-        /* end peak when we drop well below threshold or cross baseline */
-        if (ac < (s->thresh * 0.5f) || ac < 0.0f) {
-            s->in_peak = false;
-
-            if (s->last_beat_ms >= 0) {
-                int64_t ibi_ms = s->peak_time_ms - s->last_beat_ms;
-                if (ibi_ms >= 300 && ibi_ms <= 2000) {
-                    s->bpm = (int)(60000 / ibi_ms);
-                    hr_push_bpm(s, s->bpm);
-                }
-            }
-            s->last_beat_ms = s->peak_time_ms;
-        }
-    }
-}
-
 /* ================== APP MAIN ================== */
 void app_main(void)
 {
@@ -253,13 +163,7 @@ void app_main(void)
     fprintf(f, "time_ms,IR,RED,BPM,AVG_BPM\n");
     fflush(f);
 
-    ESP_LOGI(TAG, "Recording started (output 20 Hz)");
-
-    /* Prime HR state */
-    uint32_t ir0 = 0, red0 = 0;
-    (void)max30102_read_fifo_sample(&red0, &ir0);
-    hr_state_t hr;
-    hr_init(&hr, ir0);
+    ESP_LOGI(TAG, "Recording started (sensor 100 Hz, output 20 Hz)");
 
     const TickType_t period_ticks = pdMS_TO_TICKS(50); /* 20 Hz output */
 
@@ -282,13 +186,14 @@ void app_main(void)
         ESP_ERROR_CHECK(max30102_read_fifo_sample(&red, &ir));
 
         int64_t time_ms = esp_timer_get_time() / 1000;
-        hr_update(&hr, ir, time_ms);
+        int bpm = 0;
+        int avg_bpm = 0;
 
         fprintf(f, "%lld,%lu,%lu,%d,%d\n",
-                (long long)time_ms, (unsigned long)ir, (unsigned long)red, hr.bpm, hr.avg_bpm);
+                (long long)time_ms, (unsigned long)ir, (unsigned long)red, bpm, avg_bpm);
         fflush(f);
 
-        ESP_LOGI(TAG, "REC | IR:%lu RED:%lu | BPM:%d AVG:%d", (unsigned long)ir, (unsigned long)red, hr.bpm, hr.avg_bpm);
+        ESP_LOGI(TAG, "REC | IR:%lu RED:%lu", (unsigned long)ir, (unsigned long)red);
 
         vTaskDelay(period_ticks);
     }

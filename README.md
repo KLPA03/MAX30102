@@ -4,7 +4,7 @@ ESP-IDF project that:
 
 - logs `IR`, `RED`, `BPM`, `AVG_BPM` to `/spiffs/data.csv`
 - **outputs at 20 Hz** (50 ms period) while draining MAX30102 FIFO so it doesn't overflow
-- computes heart rate via simple peak detection on the filtered IR signal
+- keeps MAX30102 configured at **100 Hz** internally and downsamples logs to **20 Hz**
 
 ## Build
 
