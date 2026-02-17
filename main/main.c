@@ -8,6 +8,7 @@
 #include "driver/i2c.h"
 
 #include "esp_err.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "esp_timer.h"
