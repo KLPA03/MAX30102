@@ -1,6 +1,6 @@
 # MAX30102
 
-## Modified Initialization Code for Heart Rate with IR Reading (20 Hz Target)
+## Modified Initialization Code for Heart Rate with Red & IR Reading (20 Hz Sampling)
 
 ```c
 /* ---------- MAX30102 INIT ---------- */
@@ -9,27 +9,32 @@ static void max30102_init(void)
     max30102_write(0x09, 0x40);   // Reset
     vTaskDelay(pdMS_TO_TICKS(100)); 
 
-    max30102_write(0x08, 0x4F);  // FIFO Config: Average 4 samples, FIFO rollover enabled
-    max30102_write(0x09, 0x03);  // SpO2 mode (enables both Red and IR LEDs)
-    max30102_write(0x0A, 0x47);  // 100 Hz sampling, 411μs pulse width, 4096 nA range
-    max30102_write(0x0C, 0x1F);  // Red LED: 6.4 mA
-    max30102_write(0x0D, 0x1F);  // IR LED: 6.4 mA (enabled for reading)
+    max30102_write(0x08, 0x0F);  // FIFO Config: No averaging, FIFO rollover enabled
+    max30102_write(0x09, 0x03);  // SpO2 mode (enables both Red and IR LEDs for heart rate)
+    max30102_write(0x0A, 0x07);  // 50 Hz sampling, 411μs pulse width, 2048 nA range
+    max30102_write(0x0C, 0x1F);  // Red LED: 6.4 mA (for heart rate)
+    max30102_write(0x0D, 0x1F);  // IR LED: 6.4 mA (for heart rate)
 
-    ESP_LOGI(TAG, "MAX30102 initialized with IR reading at ~20 Hz");
+    ESP_LOGI(TAG, "MAX30102 initialized for heart rate with Red & IR at 50 Hz (decimate to 20 Hz in software)");
 }
 ```
 
 ### Changes Made:
-- **Register 0x08**: `0x4F` - FIFO averaging of 4 samples + rollover enabled
-- **Register 0x09**: Kept as `0x03` (SpO2 mode - enables both Red and IR)
-- **Register 0x0A**: `0x47` - 100 Hz sampling, 411μs pulse width
-- **Register 0x0C**: `0x1F` - Red LED at 6.4 mA
-- **Register 0x0D**: `0x1F` - IR LED at 6.4 mA (enabled for reading)
-- Added reset command (`0x40`) at initialization
+- **Register 0x08**: `0x0F` - No FIFO averaging, rollover enabled
+- **Register 0x09**: `0x03` - SpO2 mode (enables both Red and IR for heart rate)
+- **Register 0x0A**: `0x07` - 50 Hz sampling (closest to 20 Hz), 411μs pulse width
+- **Register 0x0C**: `0x1F` - Red LED at 6.4 mA (enabled)
+- **Register 0x0D**: `0x1F` - IR LED at 6.4 mA (enabled)
 
-### Sampling Rate Configuration:
-- Hardware samples at 100 Hz
-- FIFO averages every 4 samples
-- Effective output rate: 100 Hz ÷ 4 = **25 Hz**
+### Achieving Exactly 20 Hz:
+**Hardware Limitation**: MAX30102 base sampling rates are 50, 100, 200, 400, 800, 1000, 1600, 3200 Hz. FIFO averaging only supports powers of 2 (1, 2, 4, 8, 16, 32). No combination produces exactly 20 Hz.
 
-**Note**: MAX30102 hardware limitations prevent exactly 20 Hz. The FIFO averaging only supports powers of 2 (1, 2, 4, 8, 16, 32 samples). The closest achievable rate to 20 Hz is **25 Hz** (100Hz ÷ 4 samples), which is 25% higher than requested. Alternative is 50 Hz (no averaging) or 12.5 Hz (100Hz ÷ 8 samples).
+**Solution**: 
+- Hardware samples at **50 Hz** (closest available)
+- **Software decimation**: Read every 2.5th sample OR average 5 samples over 250ms window to achieve 20 Hz effective rate
+- Alternative: Use 100 Hz hardware rate and decimate by 5 in software
+
+### Both Red and IR Enabled:
+- SpO2 mode (0x03) enables both LEDs alternately
+- Each LED pulse is captured for heart rate analysis
+- Both channels available in FIFO for processing
