@@ -20,6 +20,8 @@ idf.py build flash monitor
 
 If you see `FAILED: partition_table/partition-table.bin`, it usually means your partition table didn’t fit your configured flash size or overlaps. This repo’s `partitions.csv` is sized to fit on small flash (including 2MB), but you must `fullclean` after changing partition settings.
 
+Note: in `partitions.csv`, if you want ESP-IDF to auto-place a partition offset, you must leave the **Offset** column empty by using a double comma, e.g. `spiffs,,0x80000`.
+
 ## Extract `data.csv` from SPIFFS (from a flashed device)
 
 Prereqs:

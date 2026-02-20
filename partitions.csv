@@ -4,5 +4,5 @@ phy_init, data, phy,     0xf000,   0x1000,
 
 # Keep sizes conservative so this fits on small (2MB) flash too.
 factory,  app,  factory, 0x10000,  0x100000,
-storage,  data, spiffs,           0x80000,
+storage,  data, spiffs,  ,         0x80000,
 
