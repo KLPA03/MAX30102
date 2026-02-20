@@ -167,6 +167,16 @@ static FILE *open_csv_or_die(const char *path)
     return f;
 }
 
+static void csv_try_reopen(FILE **pf, const char *path)
+{
+    if (pf == NULL) return;
+    if (*pf != NULL) {
+        fclose(*pf);
+        *pf = NULL;
+    }
+    *pf = open_csv_or_die(path);
+}
+
 /* ================== APP MAIN ================== */
 void app_main(void)
 {
@@ -218,16 +228,33 @@ void app_main(void)
         int bpm = 0;
         int avg_bpm = 0;
 
+        if (f == NULL) {
+            csv_try_reopen(&f, csv_path);
+            if (f == NULL) {
+                vTaskDelayUntil(&last_wake, period_ticks);
+                continue;
+            }
+        }
+
+        bool ok = true;
         if (fprintf(f, "%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%d,%d\n", time_ms, ir_out, red_out, bpm, avg_bpm) < 0) {
             ESP_LOGE(TAG, "CSV write failed: errno=%d (%s)", errno, strerror(errno));
+            ok = false;
+        } else if (fflush(f) != 0) {
+            ESP_LOGW(TAG, "fflush failed: errno=%d (%s)", errno, strerror(errno));
+            ok = false;
+        }
+
+        if (!ok) {
+            ESP_LOGW(TAG, "Re-opening CSV file");
+            csv_try_reopen(&f, csv_path);
         }
 
         if ((time_ms - last_sync_ms) >= 1000) { // durability sync once per second
-            if (fflush(f) != 0) {
-                ESP_LOGW(TAG, "fflush failed: errno=%d (%s)", errno, strerror(errno));
-            }
-            if (fsync(fileno(f)) != 0) {
-                ESP_LOGW(TAG, "fsync failed: errno=%d (%s)", errno, strerror(errno));
+            if (f != NULL) {
+                if (fsync(fileno(f)) != 0) {
+                    ESP_LOGW(TAG, "fsync failed: errno=%d (%s)", errno, strerror(errno));
+                }
             }
             last_sync_ms = time_ms;
         }
