@@ -35,6 +35,12 @@ Prereqs:
 ./tools/extract_spiffs.sh /dev/ttyACM0 build storage spiffs.bin
 ```
 
+Windows (ESP-IDF Command Prompt):
+
+```bat
+tools\extract_spiffs.cmd COM5 build storage spiffs.bin
+```
+
 ### 2) Unpack the SPIFFS image into a local folder
 
 The unpack parameters must match your SPIFFS config. This repo defaults to:
@@ -46,6 +52,13 @@ The unpack parameters must match your SPIFFS config. This repo defaults to:
 ```bash
 ./tools/unpack_spiffs.sh spiffs.bin spiffs_dump 256 4096 32
 ls -ლა spiffs_dump
+```
+
+Windows:
+
+```bat
+tools\unpack_spiffs.cmd spiffs.bin spiffs_dump 256 4096 32
+dir spiffs_dump
 ```
 
 Your CSV will be at `spiffs_dump/data.csv`.
