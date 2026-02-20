@@ -37,6 +37,32 @@
 
 static const char *TAG = "MAX30102";
 
+static esp_err_t i2c_probe_addr(uint8_t addr_7bit)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (addr_7bit << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_stop(cmd);
+    esp_err_t err = i2c_master_cmd_begin(I2C_PORT, cmd, pdMS_TO_TICKS(100));
+    i2c_cmd_link_delete(cmd);
+    return err;
+}
+
+static void i2c_scan_bus(void)
+{
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+    int found = 0;
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (i2c_probe_addr(addr) == ESP_OK) {
+            ESP_LOGI(TAG, "I2C device found at 0x%02X", addr);
+            found++;
+        }
+    }
+    if (found == 0) {
+        ESP_LOGW(TAG, "No I2C devices found. Check wiring/pins/pullups.");
+    }
+}
+
 /* ---------- PREPARING ESP32-S3 TO USE I2C COMMUNICATION ---------- */
 static void init_i2c(void)
 {
@@ -113,8 +139,8 @@ static void max30102_init(void)
     ESP_ERROR_CHECK(max30102_write(REG_OVF_COUNTER, 0x00));
     ESP_ERROR_CHECK(max30102_write(REG_FIFO_RD_PTR, 0x00));
 
-    /* FIFO: sample average = 4, rollover = enabled, almost full = 0 */
-    ESP_ERROR_CHECK(max30102_write(REG_FIFO_CONFIG, 0x4F));
+    /* FIFO: sample average = 1 (no averaging), rollover enabled, A_FULL = 15 */
+    ESP_ERROR_CHECK(max30102_write(REG_FIFO_CONFIG, 0x1F));
 
     /* SpO2 mode (RED+IR) */
     ESP_ERROR_CHECK(max30102_write(REG_MODE_CONFIG, 0x03));
@@ -137,15 +163,26 @@ static void max30102_init(void)
     (void)max30102_write(REG_INTR_ENABLE_1, 0x00);
     (void)max30102_write(REG_INTR_ENABLE_2, 0x00);
 
+    /* Clear any pending interrupts */
+    uint8_t tmp[2];
+    (void)max30102_read(REG_INTR_STATUS_1, tmp, 2);
+
     ESP_LOGI(TAG, "MAX30102 initialized");
 }
 
 static uint8_t max30102_fifo_samples_available(void)
 {
-    uint8_t wr = 0, rd = 0;
+    uint8_t wr = 0, rd = 0, ovf = 0;
     if (max30102_read_u8(REG_FIFO_WR_PTR, &wr) != ESP_OK) return 0;
     if (max30102_read_u8(REG_FIFO_RD_PTR, &rd) != ESP_OK) return 0;
-    return (uint8_t)((wr - rd) & 0x1F); /* 32-depth FIFO */
+    if (max30102_read_u8(REG_OVF_COUNTER, &ovf) != ESP_OK) return 0;
+
+    uint8_t n = (uint8_t)((wr - rd) & 0x1F); /* 0..31; ambiguous when FIFO is full */
+    if (n == 0 && ovf != 0) {
+        /* WR==RD with overflow indicates FIFO full; treat as 32 samples available. */
+        n = 32;
+    }
+    return n;
 }
 
 static esp_err_t max30102_read_fifo_sample(uint32_t *red, uint32_t *ir)
@@ -168,6 +205,14 @@ void app_main(void)
 
     init_spiffs();
     init_i2c();
+    i2c_scan_bus();
+
+    /* Quick presence check */
+    if (i2c_probe_addr(MAX30102_ADDR) != ESP_OK) {
+        ESP_LOGE(TAG, "MAX30102 not found at 0x%02X. Check SDA/SCL pins and pullups.", MAX30102_ADDR);
+        return;
+    }
+
     max30102_init();
 
     FILE *f = fopen("/spiffs/data.csv", "a+");
@@ -208,6 +253,8 @@ void app_main(void)
             n--;
         }
         ESP_ERROR_CHECK(max30102_read_fifo_sample(&red, &ir));
+        /* Clear overflow counter after draining */
+        (void)max30102_write(REG_OVF_COUNTER, 0x00);
 
         int64_t time_ms = esp_timer_get_time() / 1000;
         int bpm = 0;
