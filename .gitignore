@@ -1,0 +1,10 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+.vscode/
+.idea/
+*.bin
+*.elf
+*.map
+spiffs_dump/
