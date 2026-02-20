@@ -61,4 +61,8 @@ tools\unpack_spiffs.cmd spiffs.bin spiffs_dump 256 4096 32
 dir spiffs_dump
 ```
 
-Your CSV will be at `spiffs_dump/data.csv`.
+Your CSV will usually be at `spiffs_dump\data.csv`, but if the unpacked name includes the mountpoint, it may appear as `spiffs_dump\spiffs\data.csv`. To find it:
+
+```bat
+dir spiffs_dump\*.csv /s
+```

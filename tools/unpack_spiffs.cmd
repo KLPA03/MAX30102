@@ -26,6 +26,10 @@ if not exist "%SPIFFS_BIN%" (
   exit /b 2
 )
 
+if not exist "%OUT_DIR%" (
+  mkdir "%OUT_DIR%" >nul 2>nul
+)
+
 python "%IDF_PATH%\components\spiffs\spiffsgen.py" ^
   --page-size "%PAGE_SIZE%" ^
   --block-size "%BLOCK_SIZE%" ^
@@ -34,6 +38,8 @@ python "%IDF_PATH%\components\spiffs\spiffsgen.py" ^
   "%OUT_DIR%"
 
 echo Unpacked into %OUT_DIR%
+echo Files found under %OUT_DIR%:
+dir "%OUT_DIR%" /s /b
 exit /b 0
 
 :usage
