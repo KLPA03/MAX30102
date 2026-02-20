@@ -22,8 +22,6 @@
 #define MAX30102_ADDR   0x57
 
 /* MAX30102 registers */
-#define REG_INTR_STATUS_1   0x00
-#define REG_INTR_STATUS_2   0x01
 #define REG_INTR_ENABLE_1   0x02
 #define REG_INTR_ENABLE_2   0x03
 #define REG_FIFO_WR_PTR     0x04
@@ -35,43 +33,13 @@
 #define REG_SPO2_CONFIG     0x0A
 #define REG_LED1_PA         0x0C /* RED */
 #define REG_LED2_PA         0x0D /* IR */
-#define REG_REV_ID          0xFE
-#define REG_PART_ID         0xFF
 
 static const char *TAG = "MAX30102";
-
-static void max30102_dump_regs(void);
-
-static esp_err_t i2c_probe_addr(uint8_t addr_7bit)
-{
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (addr_7bit << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_stop(cmd);
-    esp_err_t err = i2c_master_cmd_begin(I2C_PORT, cmd, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(cmd);
-    return err;
-}
-
-static void i2c_scan_bus(void)
-{
-    ESP_LOGI(TAG, "Scanning I2C bus...");
-    int found = 0;
-    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        if (i2c_probe_addr(addr) == ESP_OK) {
-            ESP_LOGI(TAG, "I2C device found at 0x%02X", addr);
-            found++;
-        }
-    }
-    if (found == 0) {
-        ESP_LOGW(TAG, "No I2C devices found. Check wiring/pins/pullups.");
-    }
-}
 
 /* ---------- PREPARING ESP32-S3 TO USE I2C COMMUNICATION ---------- */
 static void init_i2c(void)
 {
-    /* Initialize without using version-specific struct fields. */
+    /* Avoid version-specific struct fields (e.g. clk_flags). */
     i2c_config_t conf = { 0 };
     conf.mode = I2C_MODE_MASTER;
     conf.sda_io_num = I2C_SDA;
@@ -95,23 +63,15 @@ static void init_spiffs(void)
     };
 
     ESP_ERROR_CHECK(esp_vfs_spiffs_register(&conf));
-    size_t total = 0, used = 0;
-    if (esp_spiffs_info(conf.partition_label, &total, &used) == ESP_OK) {
-        ESP_LOGI(TAG, "SPIFFS mounted (total=%u, used=%u)", (unsigned)total, (unsigned)used);
-    } else {
-        ESP_LOGI(TAG, "SPIFFS mounted");
-    }
+    ESP_LOGI(TAG, "SPIFFS mounted");
 }
 
 static void file_flush_and_sync(FILE *f)
 {
     if (f == NULL) return;
     fflush(f);
-
     int fd = fileno(f);
-    if (fd >= 0) {
-        (void)fsync(fd);
-    }
+    if (fd >= 0) (void)fsync(fd);
 }
 
 /* ---------- MAX30102 LOW LEVEL ---------- */
@@ -123,8 +83,7 @@ static esp_err_t max30102_write(uint8_t reg, uint8_t data)
 
 static esp_err_t max30102_read(uint8_t reg, uint8_t *data, size_t len)
 {
-    return i2c_master_write_read_device(
-        I2C_PORT, MAX30102_ADDR, &reg, 1, data, len, pdMS_TO_TICKS(100));
+    return i2c_master_write_read_device(I2C_PORT, MAX30102_ADDR, &reg, 1, data, len, pdMS_TO_TICKS(100));
 }
 
 static esp_err_t max30102_read_u8(uint8_t reg, uint8_t *val)
@@ -132,84 +91,37 @@ static esp_err_t max30102_read_u8(uint8_t reg, uint8_t *val)
     return max30102_read(reg, val, 1);
 }
 
-static bool max30102_check_id(void)
-{
-    uint8_t part = 0, rev = 0;
-    esp_err_t e1 = max30102_read_u8(REG_PART_ID, &part);
-    esp_err_t e2 = max30102_read_u8(REG_REV_ID, &rev);
-    if (e1 != ESP_OK || e2 != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read PART/REV ID (err=%s/%s)",
-                 esp_err_to_name(e1), esp_err_to_name(e2));
-        return false;
-    }
-
-    ESP_LOGI(TAG, "MAX3010x ID: PART_ID=0x%02X REV_ID=0x%02X", part, rev);
-    /* MAX30102 PART_ID is typically 0x15. If it differs, sensor may be different or bus read is wrong. */
-    return true;
-}
-
 /* ---------- MAX30102 INIT ---------- */
 static void max30102_init(void)
 {
-    /* Reset */
-    ESP_ERROR_CHECK(max30102_write(REG_MODE_CONFIG, 0x40));
+    ESP_ERROR_CHECK(max30102_write(REG_MODE_CONFIG, 0x40)); /* reset */
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    /* Clear FIFO pointers */
     ESP_ERROR_CHECK(max30102_write(REG_FIFO_WR_PTR, 0x00));
     ESP_ERROR_CHECK(max30102_write(REG_OVF_COUNTER, 0x00));
     ESP_ERROR_CHECK(max30102_write(REG_FIFO_RD_PTR, 0x00));
 
-    /* FIFO: sample average = 1 (no averaging), rollover enabled, A_FULL = 15 */
-    ESP_ERROR_CHECK(max30102_write(REG_FIFO_CONFIG, 0x1F));
+    /* Your known-working setting */
+    ESP_ERROR_CHECK(max30102_write(REG_FIFO_CONFIG, 0x4F));
 
-    /* SpO2 mode (RED+IR) */
-    ESP_ERROR_CHECK(max30102_write(REG_MODE_CONFIG, 0x03));
+    ESP_ERROR_CHECK(max30102_write(REG_MODE_CONFIG, 0x03)); /* SpO2 mode */
+    ESP_ERROR_CHECK(max30102_write(REG_SPO2_CONFIG, 0x27)); /* 100 Hz */
 
-    /*
-     * SpO2 config:
-     * - ADC range = 4096 nA (0b01 << 5)
-     * - sample rate = 100 Hz (0b011 << 2)
-     * - pulse width = 411 us (0b11)
-     *
-     * Note: MAX30102 doesn't support 20 Hz directly; we downsample in firmware to 20 Hz.
-     */
-    ESP_ERROR_CHECK(max30102_write(REG_SPO2_CONFIG, 0x27));
+    ESP_ERROR_CHECK(max30102_write(REG_LED1_PA, 0x1F));
+    ESP_ERROR_CHECK(max30102_write(REG_LED2_PA, 0x1F));
 
-    /* LED currents */
-    ESP_ERROR_CHECK(max30102_write(REG_LED1_PA, 0x1F)); /* RED */
-    ESP_ERROR_CHECK(max30102_write(REG_LED2_PA, 0x1F)); /* IR */
-
-    /* Disable interrupts (poll FIFO) */
     (void)max30102_write(REG_INTR_ENABLE_1, 0x00);
     (void)max30102_write(REG_INTR_ENABLE_2, 0x00);
 
-    /* Clear any pending interrupts */
-    uint8_t tmp[2];
-    (void)max30102_read(REG_INTR_STATUS_1, tmp, 2);
-
     ESP_LOGI(TAG, "MAX30102 initialized");
-    max30102_dump_regs();
 }
 
 static uint8_t max30102_fifo_samples_available(void)
 {
-    uint8_t wr = 0, rd = 0, ovf = 0;
-    esp_err_t ewr = max30102_read_u8(REG_FIFO_WR_PTR, &wr);
-    esp_err_t erd = max30102_read_u8(REG_FIFO_RD_PTR, &rd);
-    esp_err_t eov = max30102_read_u8(REG_OVF_COUNTER, &ovf);
-    if (ewr != ESP_OK || erd != ESP_OK || eov != ESP_OK) {
-        ESP_LOGW(TAG, "FIFO ptr read failed (wr:%s rd:%s ovf:%s)",
-                 esp_err_to_name(ewr), esp_err_to_name(erd), esp_err_to_name(eov));
-        return 0;
-    }
-
-    uint8_t n = (uint8_t)((wr - rd) & 0x1F); /* 0..31; ambiguous when FIFO is full */
-    if (n == 0 && ovf != 0) {
-        /* WR==RD with overflow indicates FIFO full; treat as 32 samples available. */
-        n = 32;
-    }
-    return n;
+    uint8_t wr = 0, rd = 0;
+    if (max30102_read_u8(REG_FIFO_WR_PTR, &wr) != ESP_OK) return 0;
+    if (max30102_read_u8(REG_FIFO_RD_PTR, &rd) != ESP_OK) return 0;
+    return (uint8_t)((wr - rd) & 0x1F);
 }
 
 static esp_err_t max30102_read_fifo_sample(uint32_t *red, uint32_t *ir)
@@ -225,22 +137,6 @@ static esp_err_t max30102_read_fifo_sample(uint32_t *red, uint32_t *ir)
     return ESP_OK;
 }
 
-static void max30102_dump_regs(void)
-{
-    uint8_t mode = 0, spo2 = 0, fifo = 0, led1 = 0, led2 = 0, wr = 0, rd = 0, ovf = 0;
-    (void)max30102_read_u8(REG_MODE_CONFIG, &mode);
-    (void)max30102_read_u8(REG_SPO2_CONFIG, &spo2);
-    (void)max30102_read_u8(REG_FIFO_CONFIG, &fifo);
-    (void)max30102_read_u8(REG_LED1_PA, &led1);
-    (void)max30102_read_u8(REG_LED2_PA, &led2);
-    (void)max30102_read_u8(REG_FIFO_WR_PTR, &wr);
-    (void)max30102_read_u8(REG_FIFO_RD_PTR, &rd);
-    (void)max30102_read_u8(REG_OVF_COUNTER, &ovf);
-
-    ESP_LOGI(TAG, "REGS mode=0x%02X spo2=0x%02X fifo=0x%02X ledR=0x%02X ledIR=0x%02X wr=%u rd=%u ovf=%u",
-             mode, spo2, fifo, led1, led2, (unsigned)wr, (unsigned)rd, (unsigned)ovf);
-}
-
 /* ================== APP MAIN ================== */
 void app_main(void)
 {
@@ -248,19 +144,6 @@ void app_main(void)
 
     init_spiffs();
     init_i2c();
-    i2c_scan_bus();
-
-    /* Quick presence check */
-    if (i2c_probe_addr(MAX30102_ADDR) != ESP_OK) {
-        ESP_LOGE(TAG, "MAX30102 not found at 0x%02X. Check SDA/SCL pins and pullups.", MAX30102_ADDR);
-        return;
-    }
-
-    if (!max30102_check_id()) {
-        ESP_LOGE(TAG, "MAX3010x ID read failed. Check wiring/level shifting.");
-        return;
-    }
-
     max30102_init();
 
     FILE *f = fopen("/spiffs/data.csv", "a+");
@@ -269,7 +152,7 @@ void app_main(void)
         return;
     }
 
-    /* Write header only if file is empty */
+    /* Header only once (important for offline extraction consistency). */
     long size = 0;
     if (fseek(f, 0, SEEK_END) == 0) {
         size = ftell(f);
@@ -281,34 +164,23 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Recording started (sensor 100 Hz, output 20 Hz)");
 
-    const TickType_t period_ticks = pdMS_TO_TICKS(50); /* 20 Hz output */
+    const TickType_t period_ticks = pdMS_TO_TICKS(50);
     uint32_t sync_counter = 0;
-    uint32_t empty_counter = 0;
 
     while (1) {
-        /* Drain FIFO to keep newest sample (avoid overflow when sensor runs faster than 20 Hz) */
         uint8_t n = max30102_fifo_samples_available();
         uint32_t ir = 0, red = 0;
 
         if (n == 0) {
-            /* no new samples yet */
-            if ((++empty_counter % 40) == 0) { /* ~2 seconds */
-                ESP_LOGW(TAG, "No FIFO samples yet. Dumping regs...");
-                max30102_dump_regs();
-            }
             vTaskDelay(period_ticks);
             continue;
         }
-        empty_counter = 0;
 
-        /* Discard all but the last sample */
         while (n > 1) {
             (void)max30102_read_fifo_sample(&red, &ir);
             n--;
         }
         ESP_ERROR_CHECK(max30102_read_fifo_sample(&red, &ir));
-        /* Clear overflow counter after draining */
-        (void)max30102_write(REG_OVF_COUNTER, 0x00);
 
         int64_t time_ms = esp_timer_get_time() / 1000;
         int bpm = 0;
@@ -316,15 +188,15 @@ void app_main(void)
 
         fprintf(f, "%lld,%lu,%lu,%d,%d\n",
                 (long long)time_ms, (unsigned long)ir, (unsigned long)red, bpm, avg_bpm);
-        /* Ensure the file is actually committed to flash for later SPIFFS extraction */
-        if ((++sync_counter % 20) == 0) { /* ~1 second at 20 Hz */
+
+        /* Make sure `data.csv` exists in the raw SPIFFS image you read with `parttool.py`. */
+        if ((++sync_counter % 20) == 0) { /* ~1 second */
             file_flush_and_sync(f);
         } else {
             fflush(f);
         }
 
         ESP_LOGI(TAG, "REC | IR:%lu RED:%lu", (unsigned long)ir, (unsigned long)red);
-
         vTaskDelay(period_ticks);
     }
 }
