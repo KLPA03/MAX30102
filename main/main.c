@@ -35,8 +35,12 @@
 #define REG_SPO2_CONFIG     0x0A
 #define REG_LED1_PA         0x0C /* RED */
 #define REG_LED2_PA         0x0D /* IR */
+#define REG_REV_ID          0xFE
+#define REG_PART_ID         0xFF
 
 static const char *TAG = "MAX30102";
+
+static void max30102_dump_regs(void);
 
 static esp_err_t i2c_probe_addr(uint8_t addr_7bit)
 {
@@ -128,6 +132,22 @@ static esp_err_t max30102_read_u8(uint8_t reg, uint8_t *val)
     return max30102_read(reg, val, 1);
 }
 
+static bool max30102_check_id(void)
+{
+    uint8_t part = 0, rev = 0;
+    esp_err_t e1 = max30102_read_u8(REG_PART_ID, &part);
+    esp_err_t e2 = max30102_read_u8(REG_REV_ID, &rev);
+    if (e1 != ESP_OK || e2 != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read PART/REV ID (err=%s/%s)",
+                 esp_err_to_name(e1), esp_err_to_name(e2));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "MAX3010x ID: PART_ID=0x%02X REV_ID=0x%02X", part, rev);
+    /* MAX30102 PART_ID is typically 0x15. If it differs, sensor may be different or bus read is wrong. */
+    return true;
+}
+
 /* ---------- MAX30102 INIT ---------- */
 static void max30102_init(void)
 {
@@ -169,14 +189,20 @@ static void max30102_init(void)
     (void)max30102_read(REG_INTR_STATUS_1, tmp, 2);
 
     ESP_LOGI(TAG, "MAX30102 initialized");
+    max30102_dump_regs();
 }
 
 static uint8_t max30102_fifo_samples_available(void)
 {
     uint8_t wr = 0, rd = 0, ovf = 0;
-    if (max30102_read_u8(REG_FIFO_WR_PTR, &wr) != ESP_OK) return 0;
-    if (max30102_read_u8(REG_FIFO_RD_PTR, &rd) != ESP_OK) return 0;
-    if (max30102_read_u8(REG_OVF_COUNTER, &ovf) != ESP_OK) return 0;
+    esp_err_t ewr = max30102_read_u8(REG_FIFO_WR_PTR, &wr);
+    esp_err_t erd = max30102_read_u8(REG_FIFO_RD_PTR, &rd);
+    esp_err_t eov = max30102_read_u8(REG_OVF_COUNTER, &ovf);
+    if (ewr != ESP_OK || erd != ESP_OK || eov != ESP_OK) {
+        ESP_LOGW(TAG, "FIFO ptr read failed (wr:%s rd:%s ovf:%s)",
+                 esp_err_to_name(ewr), esp_err_to_name(erd), esp_err_to_name(eov));
+        return 0;
+    }
 
     uint8_t n = (uint8_t)((wr - rd) & 0x1F); /* 0..31; ambiguous when FIFO is full */
     if (n == 0 && ovf != 0) {
@@ -199,6 +225,22 @@ static esp_err_t max30102_read_fifo_sample(uint32_t *red, uint32_t *ir)
     return ESP_OK;
 }
 
+static void max30102_dump_regs(void)
+{
+    uint8_t mode = 0, spo2 = 0, fifo = 0, led1 = 0, led2 = 0, wr = 0, rd = 0, ovf = 0;
+    (void)max30102_read_u8(REG_MODE_CONFIG, &mode);
+    (void)max30102_read_u8(REG_SPO2_CONFIG, &spo2);
+    (void)max30102_read_u8(REG_FIFO_CONFIG, &fifo);
+    (void)max30102_read_u8(REG_LED1_PA, &led1);
+    (void)max30102_read_u8(REG_LED2_PA, &led2);
+    (void)max30102_read_u8(REG_FIFO_WR_PTR, &wr);
+    (void)max30102_read_u8(REG_FIFO_RD_PTR, &rd);
+    (void)max30102_read_u8(REG_OVF_COUNTER, &ovf);
+
+    ESP_LOGI(TAG, "REGS mode=0x%02X spo2=0x%02X fifo=0x%02X ledR=0x%02X ledIR=0x%02X wr=%u rd=%u ovf=%u",
+             mode, spo2, fifo, led1, led2, (unsigned)wr, (unsigned)rd, (unsigned)ovf);
+}
+
 /* ================== APP MAIN ================== */
 void app_main(void)
 {
@@ -211,6 +253,11 @@ void app_main(void)
     /* Quick presence check */
     if (i2c_probe_addr(MAX30102_ADDR) != ESP_OK) {
         ESP_LOGE(TAG, "MAX30102 not found at 0x%02X. Check SDA/SCL pins and pullups.", MAX30102_ADDR);
+        return;
+    }
+
+    if (!max30102_check_id()) {
+        ESP_LOGE(TAG, "MAX3010x ID read failed. Check wiring/level shifting.");
         return;
     }
 
@@ -236,6 +283,7 @@ void app_main(void)
 
     const TickType_t period_ticks = pdMS_TO_TICKS(50); /* 20 Hz output */
     uint32_t sync_counter = 0;
+    uint32_t empty_counter = 0;
 
     while (1) {
         /* Drain FIFO to keep newest sample (avoid overflow when sensor runs faster than 20 Hz) */
@@ -244,9 +292,14 @@ void app_main(void)
 
         if (n == 0) {
             /* no new samples yet */
+            if ((++empty_counter % 40) == 0) { /* ~2 seconds */
+                ESP_LOGW(TAG, "No FIFO samples yet. Dumping regs...");
+                max30102_dump_regs();
+            }
             vTaskDelay(period_ticks);
             continue;
         }
+        empty_counter = 0;
 
         /* Discard all but the last sample */
         while (n > 1) {
