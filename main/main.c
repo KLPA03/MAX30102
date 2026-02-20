@@ -160,11 +160,34 @@ static FILE *open_csv_or_die(const char *path)
             fclose(f);
             return NULL;
         }
-        fflush(f);
-        fsync(fileno(f));
+        (void)fflush(f);
+        (void)fsync(fileno(f)); // may be ENOSYS on SPIFFS; handled in periodic sync path
     }
 
     return f;
+}
+
+static void csv_sync(FILE *f)
+{
+    if (f == NULL) return;
+
+    if (fflush(f) != 0) {
+        ESP_LOGW(TAG, "fflush failed: errno=%d (%s)", errno, strerror(errno));
+        return;
+    }
+
+    // SPIFFS VFS often doesn't implement fsync(); ignore ENOSYS to avoid log spam.
+    static bool warned_fsync_unsupported = false;
+    if (fsync(fileno(f)) != 0) {
+        if (errno == ENOSYS) {
+            if (!warned_fsync_unsupported) {
+                ESP_LOGI(TAG, "fsync() not implemented by SPIFFS VFS; relying on fflush()");
+                warned_fsync_unsupported = true;
+            }
+            return;
+        }
+        ESP_LOGW(TAG, "fsync failed: errno=%d (%s)", errno, strerror(errno));
+    }
 }
 
 static void csv_try_reopen(FILE **pf, const char *path)
@@ -240,9 +263,11 @@ void app_main(void)
         if (fprintf(f, "%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%d,%d\n", time_ms, ir_out, red_out, bpm, avg_bpm) < 0) {
             ESP_LOGE(TAG, "CSV write failed: errno=%d (%s)", errno, strerror(errno));
             ok = false;
-        } else if (fflush(f) != 0) {
-            ESP_LOGW(TAG, "fflush failed: errno=%d (%s)", errno, strerror(errno));
-            ok = false;
+        } else {
+            if (fflush(f) != 0) {
+                ESP_LOGW(TAG, "fflush failed: errno=%d (%s)", errno, strerror(errno));
+                ok = false;
+            }
         }
 
         if (!ok) {
@@ -251,11 +276,7 @@ void app_main(void)
         }
 
         if ((time_ms - last_sync_ms) >= 1000) { // durability sync once per second
-            if (f != NULL) {
-                if (fsync(fileno(f)) != 0) {
-                    ESP_LOGW(TAG, "fsync failed: errno=%d (%s)", errno, strerror(errno));
-                }
-            }
+            csv_sync(f);
             last_sync_ms = time_ms;
         }
 
