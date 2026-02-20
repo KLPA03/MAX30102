@@ -19,11 +19,11 @@ idf.py build flash monitor
 
 ## Extracting `data.csv` from SPIFFS (offline)
 
-Your SPIFFS partition size in `partitions.csv` is **1M** (hex **0x100000**). When unpacking, the size passed to `spiffsgen.py` must match the partition size.
+Your SPIFFS partition size in `partitions.csv` is **0x110000**. When unpacking, the size passed to `spiffsgen.py` must match the partition size.
 
 Example (PowerShell):
 
 ```bash
 python $env:IDF_PATH\components\partition_table\parttool.py --port COM6 read_partition --partition-name spiffs --output spiffs.bin
-python $env:IDF_PATH\components\spiffs\spiffsgen.py 0x100000 spiffs.bin extracted --unpack
+python $env:IDF_PATH\components\spiffs\spiffsgen.py --unpack 0x110000 spiffs.bin extracted
 ```
