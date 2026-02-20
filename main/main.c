@@ -9,7 +9,6 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 
-#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "esp_timer.h"
@@ -49,11 +48,6 @@ static void init_i2c(void)
     conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
     conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
     conf.master.clk_speed = I2C_FREQ_HZ;
-
-    /* `clk_flags` exists on newer ESP-IDF versions. */
-#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
-    conf.clk_flags = 0;
-#endif
 
     ESP_ERROR_CHECK(i2c_param_config(I2C_PORT, &conf));
     ESP_ERROR_CHECK(i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0));
