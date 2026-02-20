@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -64,7 +65,23 @@ static void init_spiffs(void)
     };
 
     ESP_ERROR_CHECK(esp_vfs_spiffs_register(&conf));
-    ESP_LOGI(TAG, "SPIFFS mounted");
+    size_t total = 0, used = 0;
+    if (esp_spiffs_info(conf.partition_label, &total, &used) == ESP_OK) {
+        ESP_LOGI(TAG, "SPIFFS mounted (total=%u, used=%u)", (unsigned)total, (unsigned)used);
+    } else {
+        ESP_LOGI(TAG, "SPIFFS mounted");
+    }
+}
+
+static void file_flush_and_sync(FILE *f)
+{
+    if (f == NULL) return;
+    fflush(f);
+
+    int fd = fileno(f);
+    if (fd >= 0) {
+        (void)fsync(fd);
+    }
 }
 
 /* ---------- MAX30102 LOW LEVEL ---------- */
@@ -154,19 +171,26 @@ void app_main(void)
     init_i2c();
     max30102_init();
 
-    FILE *f = fopen("/spiffs/data.csv", "a");
+    FILE *f = fopen("/spiffs/data.csv", "a+");
     if (f == NULL) {
         ESP_LOGE(TAG, "Failed to open CSV file");
         return;
     }
 
-    /* Always write header (simple); you can remove if you want header only once. */
-    fprintf(f, "time_ms,IR,RED,BPM,AVG_BPM\n");
-    fflush(f);
+    /* Write header only if file is empty */
+    long size = 0;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        size = ftell(f);
+    }
+    if (size <= 0) {
+        fprintf(f, "time_ms,IR,RED,BPM,AVG_BPM\n");
+        file_flush_and_sync(f);
+    }
 
     ESP_LOGI(TAG, "Recording started (sensor 100 Hz, output 20 Hz)");
 
     const TickType_t period_ticks = pdMS_TO_TICKS(50); /* 20 Hz output */
+    uint32_t sync_counter = 0;
 
     while (1) {
         /* Drain FIFO to keep newest sample (avoid overflow when sensor runs faster than 20 Hz) */
@@ -192,7 +216,12 @@ void app_main(void)
 
         fprintf(f, "%lld,%lu,%lu,%d,%d\n",
                 (long long)time_ms, (unsigned long)ir, (unsigned long)red, bpm, avg_bpm);
-        fflush(f);
+        /* Ensure the file is actually committed to flash for later SPIFFS extraction */
+        if ((++sync_counter % 20) == 0) { /* ~1 second at 20 Hz */
+            file_flush_and_sync(f);
+        } else {
+            fflush(f);
+        }
 
         ESP_LOGI(TAG, "REC | IR:%lu RED:%lu", (unsigned long)ir, (unsigned long)red);
 
