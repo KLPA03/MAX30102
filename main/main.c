@@ -9,6 +9,7 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "esp_timer.h"
@@ -40,15 +41,19 @@ static const char *TAG = "MAX30102";
 /* ---------- PREPARING ESP32-S3 TO USE I2C COMMUNICATION ---------- */
 static void init_i2c(void)
 {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_SDA,
-        .scl_io_num = I2C_SCL,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_FREQ_HZ,
-        .clk_flags = 0,
-    };
+    /* Initialize without using version-specific struct fields. */
+    i2c_config_t conf = { 0 };
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = I2C_SDA;
+    conf.scl_io_num = I2C_SCL;
+    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.master.clk_speed = I2C_FREQ_HZ;
+
+    /* `clk_flags` exists on newer ESP-IDF versions. */
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
+    conf.clk_flags = 0;
+#endif
 
     ESP_ERROR_CHECK(i2c_param_config(I2C_PORT, &conf));
     ESP_ERROR_CHECK(i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0));
