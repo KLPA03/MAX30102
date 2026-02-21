@@ -1,0 +1,16 @@
+#
+# Project defaults (used to generate sdkconfig on first build)
+#
+
+# Use our custom partition table with a SPIFFS partition
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# SPIFFS (required for esp_vfs_spiffs_register)
+CONFIG_SPIFFS_MAX_PARTITIONS=1
+CONFIG_SPIFFS_CACHE=y
+CONFIG_SPIFFS_CACHE_WR=y
+CONFIG_SPIFFS_PAGE_CHECK=y
+CONFIG_SPIFFS_USE_MAGIC=y
+CONFIG_SPIFFS_USE_MAGIC_LENGTH=y
+
