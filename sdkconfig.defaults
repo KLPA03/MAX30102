@@ -1,0 +1,17 @@
+#
+# Project defaults (used to generate sdkconfig on first build)
+#
+
+# Use our custom partition table with a FAT partition (USB MSC)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# TinyUSB Mass Storage Class
+CONFIG_TINYUSB_MSC_ENABLED=y
+
+# Wear levelling + FATFS (required for flash-backed MSC)
+CONFIG_WL_SECTOR_SIZE_512=y
+CONFIG_WL_SECTOR_MODE_PERF=y
+CONFIG_FATFS_LFN_HEAP=y
+
