@@ -1,4 +1,13 @@
-# MAX30102
+# MAX30102 Heart Rate Monitor
+
+ESP-IDF project for heart rate monitoring with Red & IR LED readings at exactly 20 Hz sampling rate.
+
+## Building the Project
+
+```bash
+idf.py build
+idf.py -p PORT flash monitor
+```
 
 ## Heart Rate Monitoring with Red & IR Reading at Exactly 20 Hz
 
@@ -85,3 +94,34 @@ void max30102_task(void *pvParameters)
 - **Output Rate**: 100 Hz ÷ 5 = **Exactly 20 Hz**
 - **Mode**: SpO2 mode (0x03) for both LED readings
 - **Use Case**: Heart rate monitoring with both wavelengths
+
+## Project Structure
+
+```
+.
+├── CMakeLists.txt              # Main project CMake file
+├── partitions.csv              # Custom partition table (no SPIFFS)
+├── sdkconfig.defaults          # Default SDK configuration
+├── main/
+│   ├── CMakeLists.txt          # Component CMake file
+│   ├── main.c                  # Application entry point
+│   ├── max30102.c              # MAX30102 driver implementation
+│   └── max30102.h              # MAX30102 driver header
+└── README.md                   # This file
+```
+
+## Hardware Connections
+
+- **SDA**: GPIO 21
+- **SCL**: GPIO 22
+- **VCC**: 3.3V
+- **GND**: GND
+
+## Fix for SPIFFS Build Error
+
+If you encounter "Failed to create SPIFFS image for partition 'spiffs'" error:
+
+1. This project uses a custom partition table without SPIFFS
+2. Copy `partitions.csv` and `sdkconfig.defaults` to your project root
+3. Run `idf.py fullclean` then `idf.py build`
+4. Or manually configure: `idf.py menuconfig` → Partition Table → Custom partition table CSV
