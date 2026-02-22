@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "wear_levelling.h"
 
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 
 #include "tinyusb.h"
@@ -457,7 +458,8 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &s_i2c_bus));
 
-    i2c_master_device_config_t dev_cfg = {
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = MAX30102_I2C_ADDR,
         .scl_speed_hz = I2C_FREQ_HZ,
     };
