@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,8 +10,14 @@
 #include "driver/i2c.h"
 
 #include "esp_log.h"
-#include "esp_spiffs.h"
 #include "esp_timer.h"
+#include "esp_partition.h"
+
+#include "wear_levelling.h"
+
+#include "tinyusb.h"
+#include "tinyusb_default_config.h"
+#include "tinyusb_msc.h"
 
 /* ================== ESP32-S3 CONNECTION TO MAX30102 ================== */
 #define I2C_PORT        I2C_NUM_0
@@ -53,18 +60,117 @@ static void init_i2c(void)
     ESP_ERROR_CHECK(i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0));
 }
 
-/* ---------- SPIFFS MOUNTING IN FLASH MEMORY ---------- */
-static void init_spiffs(void)
+/* ---------- USB MSC (flash-backed FAT) ---------- */
+#define BASE_PATH "/data"
+
+static tinyusb_msc_storage_handle_t s_storage = NULL;
+
+#define EPNUM_MSC       1
+#define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN)
+
+enum {
+    ITF_NUM_MSC = 0,
+    ITF_NUM_TOTAL
+};
+
+enum {
+    EDPT_CTRL_OUT = 0x00,
+    EDPT_CTRL_IN  = 0x80,
+
+    EDPT_MSC_OUT  = 0x01,
+    EDPT_MSC_IN   = 0x81,
+};
+
+static tusb_desc_device_t s_usb_device_desc = {
+    .bLength = sizeof(tusb_desc_device_t),
+    .bDescriptorType = TUSB_DESC_DEVICE,
+    .bcdUSB = 0x0200,
+    .bDeviceClass = TUSB_CLASS_MISC,
+    .bDeviceSubClass = MISC_SUBCLASS_COMMON,
+    .bDeviceProtocol = MISC_PROTOCOL_IAD,
+    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
+    .idVendor = 0x303A,  // Espressif VID (change for products)
+    .idProduct = 0x4002,
+    .bcdDevice = 0x0100,
+    .iManufacturer = 0x01,
+    .iProduct = 0x02,
+    .iSerialNumber = 0x03,
+    .bNumConfigurations = 0x01
+};
+
+static uint8_t const s_usb_fs_cfg_desc[] = {
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EDPT_MSC_OUT, EDPT_MSC_IN, 64),
+};
+
+static char const *s_usb_string_desc[] = {
+    (const char[]) { 0x09, 0x04 },  // 0: English (0x0409)
+    "MAX30102",                     // 1: Manufacturer
+    "MAX30102 Logger",              // 2: Product
+    "000001",                       // 3: Serial
+    "MSC",                          // 4: MSC Interface
+};
+
+static void storage_mount_changed_cb(tinyusb_msc_storage_handle_t handle, tinyusb_msc_event_t *event, void *arg)
 {
-    esp_vfs_spiffs_conf_t conf = {
-        .base_path = "/spiffs",
-        .partition_label = NULL,
-        .max_files = 5,
-        .format_if_mount_failed = true,
+    switch (event->id) {
+    case TINYUSB_MSC_EVENT_MOUNT_COMPLETE:
+        ESP_LOGI(TAG, "Storage mounted to application: %s",
+                 (event->mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) ? "Yes" : "No");
+        break;
+    case TINYUSB_MSC_EVENT_MOUNT_FAILED:
+    case TINYUSB_MSC_EVENT_FORMAT_REQUIRED:
+        ESP_LOGE(TAG, "Storage mount failed or format required");
+        break;
+    default:
+        break;
+    }
+}
+
+static esp_err_t storage_init_spiflash(wl_handle_t *wl_handle)
+{
+    const esp_partition_t *data_partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, NULL);
+    if (data_partition == NULL) {
+        ESP_LOGE(TAG, "Failed to find FATFS partition. Check partitions.csv.");
+        return ESP_ERR_NOT_FOUND;
+    }
+    return wl_mount(data_partition, wl_handle);
+}
+
+static void init_usb_msc(void)
+{
+    static wl_handle_t wl_handle = WL_INVALID_HANDLE;
+    ESP_ERROR_CHECK(storage_init_spiflash(&wl_handle));
+
+    const tinyusb_msc_storage_config_t storage_cfg = {
+        .mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP,  // App owns storage unless USB host claims it
+        .medium.wl_handle = wl_handle,
+        .fat_fs = {
+            .base_path = BASE_PATH,
+            .config.max_files = 5,
+            .format_flags = 0,
+        },
     };
 
-    ESP_ERROR_CHECK(esp_vfs_spiffs_register(&conf));
-    ESP_LOGI(TAG, "SPIFFS mounted");
+    ESP_ERROR_CHECK(tinyusb_msc_new_storage_spiflash(&storage_cfg, &s_storage));
+    ESP_ERROR_CHECK(tinyusb_msc_set_storage_callback(storage_mount_changed_cb, NULL));
+
+    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    tusb_cfg.descriptor.device = &s_usb_device_desc;
+    tusb_cfg.descriptor.full_speed_config = s_usb_fs_cfg_desc;
+    tusb_cfg.descriptor.string = s_usb_string_desc;
+    tusb_cfg.descriptor.string_count = sizeof(s_usb_string_desc) / sizeof(s_usb_string_desc[0]);
+
+    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+}
+
+static bool storage_is_mounted_to_app(void)
+{
+    if (s_storage == NULL) return false;
+    tinyusb_msc_mount_point_t mp = TINYUSB_MSC_STORAGE_MOUNT_USB;
+    if (tinyusb_msc_get_storage_mount_point(s_storage, &mp) != ESP_OK) return false;
+    return mp == TINYUSB_MSC_STORAGE_MOUNT_APP;
 }
 
 /* ---------- MAX30102 LOW LEVEL ---------- */
@@ -135,24 +241,47 @@ void app_main(void)
 {
     ESP_LOGI("CHECK", "I AM RUNNING");
 
-    init_spiffs();
+    init_usb_msc();
     init_i2c();
     max30102_init();
 
-    FILE *f = fopen("/spiffs/data.csv", "a");
-    if (f == NULL) {
-        ESP_LOGE(TAG, "Failed to open CSV file");
-        return;
-    }
-
-    fprintf(f, "time_ms,IR,RED,BPM,AVG_BPM\n");
-    fflush(f);
-
-    ESP_LOGI(TAG, "Recording started (sensor 100 Hz, output 20 Hz)");
-
     const TickType_t period_ticks = pdMS_TO_TICKS(50);
+    const TickType_t usb_poll_ticks = pdMS_TO_TICKS(200);
+
+    FILE *f = NULL;
+    bool header_done = false;
+
+    ESP_LOGI(TAG, "Recording started (sensor 100 Hz, output 20 Hz).");
+    ESP_LOGI(TAG, "When USB host mounts MSC, logging pauses until host ejects the drive.");
 
     while (1) {
+        if (!storage_is_mounted_to_app()) {
+            if (f) {
+                fflush(f);
+                fclose(f);
+                f = NULL;
+            }
+            header_done = false;
+            vTaskDelay(usb_poll_ticks);
+            continue;
+        }
+
+        if (f == NULL) {
+            f = fopen(BASE_PATH "/data.csv", "a+");
+            if (f == NULL) {
+                ESP_LOGE(TAG, "Failed to open %s/data.csv (is the drive formatted?)", BASE_PATH);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            if (!header_done && sz == 0) {
+                fprintf(f, "time_ms,IR,RED,BPM,AVG_BPM\n");
+                fflush(f);
+            }
+            header_done = true;
+        }
+
         uint8_t n = max30102_fifo_samples_available();
         uint32_t ir = 0, red = 0;
 

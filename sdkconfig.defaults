@@ -2,15 +2,16 @@
 # Project defaults (used to generate sdkconfig on first build)
 #
 
-# Use our custom partition table with a SPIFFS partition
+# Use our custom partition table with a FAT partition (USB MSC)
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
-# SPIFFS (required for esp_vfs_spiffs_register)
-CONFIG_SPIFFS_MAX_PARTITIONS=1
-CONFIG_SPIFFS_CACHE=y
-CONFIG_SPIFFS_CACHE_WR=y
-CONFIG_SPIFFS_PAGE_CHECK=y
-CONFIG_SPIFFS_USE_MAGIC=y
-CONFIG_SPIFFS_USE_MAGIC_LENGTH=y
+# TinyUSB Mass Storage Class
+CONFIG_TINYUSB_MSC_ENABLED=y
+
+# Wear levelling + FATFS (required for flash-backed MSC)
+CONFIG_WL_SECTOR_SIZE_512=y
+CONFIG_WL_SECTOR_MODE_PERF=y
+CONFIG_FATFS_LFN_HEAP=y
 
