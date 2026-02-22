@@ -65,58 +65,11 @@ static void init_i2c(void)
 
 static tinyusb_msc_storage_handle_t s_storage = NULL;
 
-#define EPNUM_MSC       1
-#define TUSB_DESC_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN)
-
-enum {
-    ITF_NUM_MSC = 0,
-    ITF_NUM_TOTAL
-};
-
-enum {
-    EDPT_CTRL_OUT = 0x00,
-    EDPT_CTRL_IN  = 0x80,
-
-    EDPT_MSC_OUT  = 0x01,
-    EDPT_MSC_IN   = 0x81,
-};
-
-static tusb_desc_device_t s_usb_device_desc = {
-    .bLength = sizeof(tusb_desc_device_t),
-    .bDescriptorType = TUSB_DESC_DEVICE,
-    .bcdUSB = 0x0200,
-    .bDeviceClass = TUSB_CLASS_MISC,
-    .bDeviceSubClass = MISC_SUBCLASS_COMMON,
-    .bDeviceProtocol = MISC_PROTOCOL_IAD,
-    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
-    .idVendor = 0x303A,  // Espressif VID (change for products)
-    .idProduct = 0x4002,
-    .bcdDevice = 0x0100,
-    .iManufacturer = 0x01,
-    .iProduct = 0x02,
-    .iSerialNumber = 0x03,
-    .bNumConfigurations = 0x01
-};
-
-static uint8_t const s_usb_fs_cfg_desc[] = {
-    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-    TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EDPT_MSC_OUT, EDPT_MSC_IN, 64),
-};
-
-static char const *s_usb_string_desc[] = {
-    (const char[]) { 0x09, 0x04 },  // 0: English (0x0409)
-    "MAX30102",                     // 1: Manufacturer
-    "MAX30102 Logger",              // 2: Product
-    "000001",                       // 3: Serial
-    "MSC",                          // 4: MSC Interface
-};
-
 static void storage_mount_changed_cb(tinyusb_msc_storage_handle_t handle, tinyusb_msc_event_t *event, void *arg)
 {
     switch (event->id) {
     case TINYUSB_MSC_EVENT_MOUNT_COMPLETE:
-        ESP_LOGI(TAG, "Storage mounted to application: %s",
-                 (event->mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) ? "Yes" : "No");
+        ESP_LOGI(TAG, "Storage mount complete");
         break;
     case TINYUSB_MSC_EVENT_MOUNT_FAILED:
     case TINYUSB_MSC_EVENT_FORMAT_REQUIRED:
@@ -148,20 +101,13 @@ static void init_usb_msc(void)
         .medium.wl_handle = wl_handle,
         .fat_fs = {
             .base_path = BASE_PATH,
-            .config.max_files = 5,
-            .format_flags = 0,
         },
     };
 
     ESP_ERROR_CHECK(tinyusb_msc_new_storage_spiflash(&storage_cfg, &s_storage));
     ESP_ERROR_CHECK(tinyusb_msc_set_storage_callback(storage_mount_changed_cb, NULL));
 
-    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
-    tusb_cfg.descriptor.device = &s_usb_device_desc;
-    tusb_cfg.descriptor.full_speed_config = s_usb_fs_cfg_desc;
-    tusb_cfg.descriptor.string = s_usb_string_desc;
-    tusb_cfg.descriptor.string_count = sizeof(s_usb_string_desc) / sizeof(s_usb_string_desc[0]);
-
+    const tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
 }
 

@@ -15,6 +15,10 @@ idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
+## Requirements
+
+- ESP-IDF **v5.x** (USB Device/TinyUSB MSC support for ESP32-S3).
+
 ## Files
 
 - `main/main.c`: MAX30102 I2C CSV logger + TinyUSB MSC (flash FAT partition)
