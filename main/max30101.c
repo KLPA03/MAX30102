@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include "esp_log.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -28,7 +29,7 @@ static const char *TAG = "max30101";
 
 static esp_err_t max30101_read(max30101_t *s, uint8_t reg, uint8_t *data, size_t len)
 {
-    return i2c_master_transmit_receive(s->dev, &reg, 1, data, len, MAX30101_I2C_TIMEOUT_MS);
+    return i2c_master_write_read_device(s->i2c_port, s->i2c_addr, &reg, 1, data, len, pdMS_TO_TICKS(MAX30101_I2C_TIMEOUT_MS));
 }
 
 static esp_err_t max30101_write(max30101_t *s, uint8_t reg, const uint8_t *data, size_t len)
@@ -39,7 +40,7 @@ static esp_err_t max30101_write(max30101_t *s, uint8_t reg, const uint8_t *data,
     }
     buf[0] = reg;
     memcpy(&buf[1], data, len);
-    return i2c_master_transmit(s->dev, buf, 1 + len, MAX30101_I2C_TIMEOUT_MS);
+    return i2c_master_write_to_device(s->i2c_port, s->i2c_addr, buf, 1 + len, pdMS_TO_TICKS(MAX30101_I2C_TIMEOUT_MS));
 }
 
 esp_err_t max30101_read_reg(max30101_t *s, uint8_t reg, uint8_t *val)
@@ -59,35 +60,26 @@ esp_err_t max30101_init(max30101_t *out, const max30101_i2c_config_t *cfg)
     }
     memset(out, 0, sizeof(*out));
 
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = cfg->i2c_port,
+    out->i2c_port = (i2c_port_t)cfg->i2c_port;
+    out->i2c_addr = cfg->i2c_addr;
+
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
         .sda_io_num = cfg->sda_io,
         .scl_io_num = cfg->scl_io,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .intr_priority = 0,
-        .trans_queue_depth = 0,
-        .flags.enable_internal_pullup = 1,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = cfg->i2c_freq_hz,
     };
 
-    esp_err_t err = i2c_new_master_bus(&bus_cfg, &out->bus);
+    esp_err_t err = i2c_param_config(out->i2c_port, &conf);
     if (err != ESP_OK) {
         return err;
     }
-
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = cfg->i2c_addr,
-        .scl_speed_hz = cfg->i2c_freq_hz,
-    };
-    err = i2c_master_bus_add_device(out->bus, &dev_cfg, &out->dev);
-    if (err != ESP_OK) {
-        i2c_del_master_bus(out->bus);
-        out->bus = NULL;
+    err = i2c_driver_install(out->i2c_port, conf.mode, 0, 0, 0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }
-
-    out->i2c_addr = cfg->i2c_addr;
 
     uint8_t part = 0, rev = 0;
     if (max30101_read_reg(out, MAX30101_REG_PART_ID, &part) == ESP_OK &&
@@ -220,14 +212,7 @@ esp_err_t max30101_deinit(max30101_t *s)
     if (!s) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s->dev) {
-        i2c_master_bus_rm_device(s->dev);
-        s->dev = NULL;
-    }
-    if (s->bus) {
-        i2c_del_master_bus(s->bus);
-        s->bus = NULL;
-    }
+    (void)i2c_driver_delete(s->i2c_port);
     return ESP_OK;
 }
 

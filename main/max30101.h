@@ -2,15 +2,14 @@
 
 #include <stdint.h>
 #include "esp_err.h"
-#include "driver/i2c_master.h"
+#include "driver/i2c.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct {
-    i2c_master_bus_handle_t bus;
-    i2c_master_dev_handle_t dev;
+    i2c_port_t i2c_port;
     uint8_t i2c_addr;
 } max30101_t;
 
