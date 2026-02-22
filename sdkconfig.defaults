@@ -1,0 +1,15 @@
+# TinyUSB MSC (Mass Storage Class)
+CONFIG_TINYUSB_MSC_ENABLED=y
+
+# Custom partition table
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Wear levelling: 512B sectors (fits MSC/FAT well)
+CONFIG_WL_SECTOR_SIZE_512=y
+CONFIG_WL_SECTOR_MODE_PERF=y
+
+# FATFS options (long file names)
+CONFIG_FATFS_LFN_HEAP=y
+
