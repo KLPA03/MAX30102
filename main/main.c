@@ -111,6 +111,9 @@ static esp_err_t i2c_reg_write_u8(i2c_master_dev_handle_t dev, uint8_t reg, uint
         if (err == ESP_OK) {
             return ESP_OK;
         }
+        if (s_i2c_bus) {
+            (void)i2c_master_bus_reset(s_i2c_bus);
+        }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
     return err;
@@ -123,6 +126,9 @@ static esp_err_t i2c_reg_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t 
         err = i2c_master_transmit_receive(dev, &reg, 1, data, len, pdMS_TO_TICKS(I2C_XFER_TIMEOUT_MS));
         if (err == ESP_OK) {
             return ESP_OK;
+        }
+        if (s_i2c_bus) {
+            (void)i2c_master_bus_reset(s_i2c_bus);
         }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
@@ -200,9 +206,11 @@ static esp_err_t max30102_init_100hz(void)
 
 static esp_err_t max30102_get_unread_samples(uint8_t *unread)
 {
-    uint8_t wr = 0, rd = 0;
-    ESP_RETURN_ON_ERROR(max30102_read_u8(MAX30102_REG_FIFO_WR_PTR, &wr), TAG, "wr ptr read failed");
-    ESP_RETURN_ON_ERROR(max30102_read_u8(MAX30102_REG_FIFO_RD_PTR, &rd), TAG, "rd ptr read failed");
+    // Read FIFO_WR_PTR, OVF_COUNTER, FIFO_RD_PTR in one transaction (0x04..0x06)
+    uint8_t ptrs[3] = {0};
+    ESP_RETURN_ON_ERROR(i2c_reg_read(s_max30102, MAX30102_REG_FIFO_WR_PTR, ptrs, sizeof(ptrs)), TAG, "fifo ptrs read failed");
+    uint8_t wr = ptrs[0] & 0x1F;
+    uint8_t rd = ptrs[2] & 0x1F;
     *unread = (uint8_t)((wr - rd) & 0x1F);
     return ESP_OK;
 }
@@ -315,7 +323,9 @@ static esp_err_t msc_storage_init_spiflash(void)
     ESP_RETURN_ON_ERROR(wl_mount(fat_part, &s_wl_handle), TAG, "wl_mount failed");
 
     tinyusb_msc_storage_config_t storage_cfg = {
-        .mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB, // Start exposed to PC; logging resumes after PC ejects
+        // Start mounted to APP, so logging runs when no host is using the drive.
+        // When the USB host connects and mounts, TinyUSB will switch ownership to USB automatically.
+        .mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP,
         .fat_fs = {
             .base_path = MSC_FAT_BASE_PATH,
             .config = {
@@ -487,6 +497,7 @@ void app_main(void)
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = MAX30102_I2C_ADDR,
         .scl_speed_hz = I2C_FREQ_HZ,
+        .scl_wait_us = 50000,
     };
     ESP_ERROR_CHECK(i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_max30102));
 
