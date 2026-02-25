@@ -84,6 +84,20 @@ static FILE *s_log_msc = NULL;
 
 // ----------------------------- I2C helpers ---------------------------------
 
+static bool i2c_probe_max3010x(void)
+{
+    // Probe with retries to avoid aborting on wiring/power-up timing issues
+    for (int i = 0; i < 10; i++) {
+        esp_err_t err = i2c_master_probe(s_i2c_bus, MAX30102_I2C_ADDR, 50);
+        if (err == ESP_OK) {
+            return true;
+        }
+        ESP_LOGW(TAG, "I2C probe 0x%02X failed (%s), retrying...", MAX30102_I2C_ADDR, esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return false;
+}
+
 static esp_err_t i2c_reg_write_u8(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = {reg, val};
@@ -412,10 +426,17 @@ void app_main(void)
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
         .intr_priority = 0,
-        .trans_queue_depth = 4,
+        // Use synchronous transactions (more reliable for sensor bring-up and gives bus errors)
+        .trans_queue_depth = 0,
         .flags.enable_internal_pullup = true,
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &s_i2c_bus));
+
+    if (!i2c_probe_max3010x()) {
+        ESP_LOGE(TAG, "MAX3010x not detected at 0x%02X. Check wiring/power (3.3V, GND, SDA=%d, SCL=%d).",
+                 MAX30102_I2C_ADDR, (int)MAX30102_I2C_SDA_GPIO, (int)MAX30102_I2C_SCL_GPIO);
+        // Keep USB MSC running even if sensor is missing
+    }
 
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -424,7 +445,10 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_max30102));
 
-    ESP_ERROR_CHECK(max30102_init_100hz());
+    esp_err_t sensor_err = max30102_init_100hz();
+    if (sensor_err != ESP_OK) {
+        ESP_LOGE(TAG, "MAX3010x init failed (%s). Sensor logging will be disabled.", esp_err_to_name(sensor_err));
+    }
 
     // USB MSC storage on internal flash (FATFS + wear levelling)
     ESP_ERROR_CHECK(msc_storage_init_spiflash());
@@ -437,6 +461,8 @@ void app_main(void)
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "TinyUSB driver installed. When the PC mounts the drive, logging is paused. After safe-eject, logging resumes.");
 
-    xTaskCreate(sensor_task, "max30101", 4096, NULL, 10, NULL);
+    if (sensor_err == ESP_OK) {
+        xTaskCreate(sensor_task, "max30101", 4096, NULL, 10, NULL);
+    }
 }
 
