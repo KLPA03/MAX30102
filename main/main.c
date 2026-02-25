@@ -9,7 +9,6 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_partition.h"
-#include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "wear_levelling.h"
 
@@ -24,11 +23,11 @@
 
 // I2C pins (adjust for your ESP32-S3 board)
 #ifndef MAX30102_I2C_SDA_GPIO
-#define MAX30102_I2C_SDA_GPIO  GPIO_NUM_8
+#define MAX30102_I2C_SDA_GPIO  GPIO_NUM_5
 #endif
 
 #ifndef MAX30102_I2C_SCL_GPIO
-#define MAX30102_I2C_SCL_GPIO  GPIO_NUM_9
+#define MAX30102_I2C_SCL_GPIO  GPIO_NUM_4
 #endif
 
 #ifndef MAX30102_I2C_PORT
@@ -38,11 +37,9 @@
 #define MAX30102_I2C_ADDR      0x57
 #define I2C_FREQ_HZ            400000
 
-#define SPIFFS_BASE_PATH       "/spiffs"
 #define MSC_FAT_BASE_PATH      "/data"
 
 #define LOG_FILENAME           "log.csv"
-#define SPIFFS_LOG_PATH        SPIFFS_BASE_PATH "/" LOG_FILENAME
 #define MSC_LOG_PATH           MSC_FAT_BASE_PATH "/" LOG_FILENAME
 
 // MAX30102 sampling: configure sensor at 100 Hz, then downsample to 20 Hz by averaging 5 samples.
@@ -71,7 +68,7 @@
 
 // ----------------------------- Globals -------------------------------------
 
-static const char *TAG = "max30102_msc";
+static const char *TAG = "max30101_msc";
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_max30102;
@@ -83,7 +80,6 @@ static volatile tinyusb_msc_mount_point_t s_msc_mount_point = TINYUSB_MSC_STORAG
 static volatile bool s_msc_transition = false;
 
 static SemaphoreHandle_t s_log_mutex;
-static FILE *s_log_spiffs = NULL;
 static FILE *s_log_msc = NULL;
 
 // ----------------------------- I2C helpers ---------------------------------
@@ -128,7 +124,7 @@ static esp_err_t max30102_init_100hz(void)
     uint8_t part_id = 0;
     esp_err_t err = max30102_read_u8(MAX30102_REG_PART_ID, &part_id);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "MAX30102 PART_ID=0x%02X (expected 0x15 for MAX30102)", part_id);
+        ESP_LOGI(TAG, "MAX3010x PART_ID=0x%02X (MAX30102 is 0x15; MAX30101 differs by revision)", part_id);
     } else {
         ESP_LOGW(TAG, "Unable to read MAX30102 PART_ID (%s)", esp_err_to_name(err));
     }
@@ -196,29 +192,6 @@ static esp_err_t max30102_read_fifo_sample(uint32_t *ir, uint32_t *red)
 
 // ----------------------------- Storage / logging ---------------------------
 
-static esp_err_t spiffs_mount(void)
-{
-    esp_vfs_spiffs_conf_t conf = {
-        .base_path = SPIFFS_BASE_PATH,
-        .partition_label = "spiffs",
-        .max_files = 5,
-        .format_if_mount_failed = true,
-    };
-
-    esp_err_t err = esp_vfs_spiffs_register(&conf);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SPIFFS mount failed (%s)", esp_err_to_name(err));
-        return err;
-    }
-
-    size_t total = 0, used = 0;
-    err = esp_spiffs_info(conf.partition_label, &total, &used);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "SPIFFS mounted: total=%u, used=%u", (unsigned)total, (unsigned)used);
-    }
-    return ESP_OK;
-}
-
 static esp_err_t ensure_csv_header(FILE **fp, const char *path)
 {
     if (*fp != NULL) {
@@ -248,11 +221,6 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
 
 static void log_close_all(void)
 {
-    if (s_log_spiffs) {
-        fflush(s_log_spiffs);
-        fclose(s_log_spiffs);
-        s_log_spiffs = NULL;
-    }
     if (s_log_msc) {
         fflush(s_log_msc);
         fclose(s_log_msc);
@@ -378,19 +346,11 @@ static void sensor_task(void *arg)
 
                 if (logging_allowed() && s_log_mutex) {
                     if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                        // SPIFFS log (always available)
-                        if (ensure_csv_header(&s_log_spiffs, SPIFFS_LOG_PATH) != ESP_OK) {
-                            ESP_LOGW(TAG, "SPIFFS log open failed (%s)", SPIFFS_LOG_PATH);
-                        }
                         // MSC/FAT log (only when storage is mounted to APP)
                         if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
                             ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
                         }
 
-                        if (s_log_spiffs) {
-                            fprintf(s_log_spiffs, "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_ds, red_ds);
-                            fflush(s_log_spiffs);
-                        }
                         if (s_log_msc) {
                             fprintf(s_log_msc, "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_ds, red_ds);
                             fflush(s_log_msc);
@@ -432,7 +392,7 @@ static const tusb_desc_device_t s_device_desc = {
 static char const *s_string_desc_arr[] = {
     (const char[]) { 0x09, 0x04 },  // 0: English
     "Espressif",                    // 1: Manufacturer
-    "ESP32-S3 MAX30102 Logger",      // 2: Product
+    "ESP32-S3 MAX30101 Logger",      // 2: Product
     "0001",                         // 3: Serial
 };
 
@@ -443,7 +403,6 @@ void app_main(void)
     ESP_LOGI(TAG, "Booting");
 
     s_log_mutex = xSemaphoreCreateMutex();
-    ESP_ERROR_CHECK(spiffs_mount());
 
     // I2C init (new driver, ESP-IDF v5.x)
     i2c_master_bus_config_t bus_cfg = {
@@ -478,6 +437,6 @@ void app_main(void)
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "TinyUSB driver installed. When the PC mounts the drive, logging is paused. After safe-eject, logging resumes.");
 
-    xTaskCreate(sensor_task, "max30102", 4096, NULL, 10, NULL);
+    xTaskCreate(sensor_task, "max30101", 4096, NULL, 10, NULL);
 }
 
