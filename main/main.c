@@ -23,11 +23,11 @@
 
 // I2C pins (adjust for your ESP32-S3 board)
 #ifndef MAX30102_I2C_SDA_GPIO
-#define MAX30102_I2C_SDA_GPIO  GPIO_NUM_5
+#define MAX30102_I2C_SDA_GPIO  GPIO_NUM_8
 #endif
 
 #ifndef MAX30102_I2C_SCL_GPIO
-#define MAX30102_I2C_SCL_GPIO  GPIO_NUM_4
+#define MAX30102_I2C_SCL_GPIO  GPIO_NUM_9
 #endif
 
 #ifndef MAX30102_I2C_PORT
@@ -35,7 +35,8 @@
 #endif
 
 #define MAX30102_I2C_ADDR      0x57
-#define I2C_FREQ_HZ            400000
+// 100kHz is much more tolerant of breadboards/long wires and weak pull-ups.
+#define I2C_FREQ_HZ            100000
 
 #define MSC_FAT_BASE_PATH      "/data"
 
@@ -68,7 +69,7 @@
 
 // ----------------------------- Globals -------------------------------------
 
-static const char *TAG = "max30101_msc";
+static const char *TAG = "max3010x_msc";
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_max30102;
@@ -84,11 +85,14 @@ static FILE *s_log_msc = NULL;
 
 // ----------------------------- I2C helpers ---------------------------------
 
+#define I2C_XFER_TIMEOUT_MS  100
+#define I2C_RETRY_COUNT      3
+
 static bool i2c_probe_max3010x(void)
 {
     // Probe with retries to avoid aborting on wiring/power-up timing issues
     for (int i = 0; i < 10; i++) {
-        esp_err_t err = i2c_master_probe(s_i2c_bus, MAX30102_I2C_ADDR, 50);
+        esp_err_t err = i2c_master_probe(s_i2c_bus, MAX30102_I2C_ADDR, I2C_XFER_TIMEOUT_MS);
         if (err == ESP_OK) {
             return true;
         }
@@ -101,12 +105,28 @@ static bool i2c_probe_max3010x(void)
 static esp_err_t i2c_reg_write_u8(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = {reg, val};
-    return i2c_master_transmit(dev, buf, sizeof(buf), pdMS_TO_TICKS(100));
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < I2C_RETRY_COUNT; i++) {
+        err = i2c_master_transmit(dev, buf, sizeof(buf), pdMS_TO_TICKS(I2C_XFER_TIMEOUT_MS));
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return err;
 }
 
 static esp_err_t i2c_reg_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *data, size_t len)
 {
-    return i2c_master_transmit_receive(dev, &reg, 1, data, len, pdMS_TO_TICKS(100));
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < I2C_RETRY_COUNT; i++) {
+        err = i2c_master_transmit_receive(dev, &reg, 1, data, len, pdMS_TO_TICKS(I2C_XFER_TIMEOUT_MS));
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return err;
 }
 
 static esp_err_t max30102_read_u8(uint8_t reg, uint8_t *val)
@@ -138,7 +158,7 @@ static esp_err_t max30102_init_100hz(void)
     uint8_t part_id = 0;
     esp_err_t err = max30102_read_u8(MAX30102_REG_PART_ID, &part_id);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "MAX3010x PART_ID=0x%02X (MAX30102 is 0x15; MAX30101 differs by revision)", part_id);
+        ESP_LOGI(TAG, "MAX3010x PART_ID=0x%02X (0x15 indicates MAX30102)", part_id);
     } else {
         ESP_LOGW(TAG, "Unable to read MAX30102 PART_ID (%s)", esp_err_to_name(err));
     }
@@ -323,15 +343,23 @@ static void sensor_task(void *arg)
     uint64_t acc_ir = 0;
     uint64_t acc_red = 0;
     int acc_n = 0;
+    int consecutive_i2c_errors = 0;
 
     while (true) {
         uint8_t unread = 0;
         esp_err_t err = max30102_get_unread_samples(&unread);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "FIFO ptr read failed (%s)", esp_err_to_name(err));
+            consecutive_i2c_errors++;
+            if (consecutive_i2c_errors >= 10) {
+                ESP_LOGW(TAG, "Too many I2C errors, re-initializing MAX3010x...");
+                (void)max30102_init_100hz();
+                consecutive_i2c_errors = 0;
+            }
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        consecutive_i2c_errors = 0;
 
         if (unread == 0) {
             vTaskDelay(pdMS_TO_TICKS(5));
@@ -343,8 +371,10 @@ static void sensor_task(void *arg)
             err = max30102_read_fifo_sample(&ir, &red);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "FIFO sample read failed (%s)", esp_err_to_name(err));
+                consecutive_i2c_errors++;
                 break;
             }
+            consecutive_i2c_errors = 0;
 
             acc_ir += ir;
             acc_red += red;
@@ -406,8 +436,23 @@ static const tusb_desc_device_t s_device_desc = {
 static char const *s_string_desc_arr[] = {
     (const char[]) { 0x09, 0x04 },  // 0: English
     "Espressif",                    // 1: Manufacturer
-    "ESP32-S3 MAX30101 Logger",      // 2: Product
+    "ESP32-S3 MAX3010x Logger",      // 2: Product
     "0001",                         // 3: Serial
+};
+
+// Explicit MSC configuration descriptor (avoids "No Full-speed configuration descriptor" warning)
+#define TUSB_DESC_TOTAL_LEN   (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN)
+enum {
+    ITF_NUM_MSC = 0,
+    ITF_NUM_TOTAL
+};
+enum {
+    EDPT_MSC_OUT  = 0x01,
+    EDPT_MSC_IN   = 0x81,
+};
+static uint8_t const s_msc_fs_configuration_desc[] = {
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EDPT_MSC_OUT, EDPT_MSC_IN, 64),
 };
 
 // ----------------------------- app_main -------------------------------------
@@ -456,13 +501,14 @@ void app_main(void)
     ESP_LOGI(TAG, "Installing TinyUSB driver (MSC device)");
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device = &s_device_desc;
+    tusb_cfg.descriptor.full_speed_config = s_msc_fs_configuration_desc;
     tusb_cfg.descriptor.string = s_string_desc_arr;
     tusb_cfg.descriptor.string_count = sizeof(s_string_desc_arr) / sizeof(s_string_desc_arr[0]);
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "TinyUSB driver installed. When the PC mounts the drive, logging is paused. After safe-eject, logging resumes.");
 
     if (sensor_err == ESP_OK) {
-        xTaskCreate(sensor_task, "max30101", 4096, NULL, 10, NULL);
+        xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, NULL);
     }
 }
 

@@ -1,8 +1,8 @@
-# ESP32-S3 MAX30101 Logger (USB Mass Storage)
+# ESP32-S3 MAX3010x Logger (USB Mass Storage)
 
 ESP-IDF v5.x project for ESP32-S3 that:
 
-- Reads **MAX30101 raw RED/IR** samples at **100 Hz** over I2C
+- Reads **MAX3010x raw RED/IR** samples at **100 Hz** over I2C (MAX30102 PART_ID is typically `0x15`)
 - Downsamples to **20 Hz** (averages 5 samples)
 - Writes `log.csv` with header `time_ms,IR,RED`
 - Stores CSV on a **flash-backed FAT** partition used for **USB Mass Storage (MSC)** (`/data/log.csv`)
@@ -11,10 +11,10 @@ ESP-IDF v5.x project for ESP32-S3 that:
 ## Hardware wiring
 
 - **Power**: ESP32-S3 is powered from PC USB.
-- **Sensor**: MAX30102 via I2C, powered from ESP32-S3 **3.3 V** with common GND.
-- **I2C** (default in `main/main.c`):
-  - **SDA**: GPIO5
-  - **SCL**: GPIO4
+- **Sensor**: MAX3010x (MAX30101/MAX30102) via I2C, powered from ESP32-S3 **3.3 V** with common GND.
+- **I2C** (default in `main/main.c`, recommended for ESP32-S3 DevKitC-1):
+  - **SDA**: GPIO8
+  - **SCL**: GPIO9
   - Add proper pull-ups (most MAX30102 breakout boards already have them).
 
 If your board uses different pins, edit these defines in `main/main.c`:
