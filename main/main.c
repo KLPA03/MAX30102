@@ -118,6 +118,7 @@ static led_strip_handle_t s_led = NULL;
 // Forward declarations (needed for recovery path)
 static bool i2c_probe_max3010x(void);
 static esp_err_t max30102_init_100hz(void);
+static esp_err_t max30102_get_unread_samples(uint8_t *unread);
 
 static void i2c_bus_unlock_gpio(gpio_num_t sda, gpio_num_t scl)
 {
