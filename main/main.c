@@ -17,6 +17,8 @@
 
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
+#include "tinyusb_cdc_acm.h"
+#include "tinyusb_console.h"
 #include "tinyusb_msc.h"
 
 // ----------------------------- User config ---------------------------------
@@ -450,19 +452,31 @@ static char const *s_string_desc_arr[] = {
     "0001",                         // 3: Serial
 };
 
-// Explicit MSC configuration descriptor (avoids "No Full-speed configuration descriptor" warning)
-#define TUSB_DESC_TOTAL_LEN   (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN)
+// USB composite configuration descriptor: CDC (serial) + MSC (drive)
+#define EPNUM_MSC_OUT       0x01
+#define EPNUM_MSC_IN        0x81
+#define EPNUM_CDC_NOTIF     0x82
+#define EPNUM_CDC_OUT       0x03
+#define EPNUM_CDC_IN        0x83
+
+#define TUSB_DESC_TOTAL_LEN   (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
+
 enum {
-    ITF_NUM_MSC = 0,
+    ITF_NUM_CDC = 0,     // CDC control
+    ITF_NUM_CDC_DATA,    // CDC data
+    ITF_NUM_MSC,         // MSC
     ITF_NUM_TOTAL
 };
-enum {
-    EDPT_MSC_OUT  = 0x01,
-    EDPT_MSC_IN   = 0x81,
-};
-static uint8_t const s_msc_fs_configuration_desc[] = {
+
+static uint8_t const s_composite_fs_configuration_desc[] = {
+    // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-    TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EDPT_MSC_OUT, EDPT_MSC_IN, 64),
+
+    // CDC: interface number, string index, EP notification address, notification EP size, EP out, EP in, EP size
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 0, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
+
+    // MSC: interface number, string index, EP out, EP in, EP size
+    TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EPNUM_MSC_OUT, EPNUM_MSC_IN, 64),
 };
 
 // ----------------------------- app_main -------------------------------------
@@ -509,14 +523,25 @@ void app_main(void)
     // USB MSC storage on internal flash (FATFS + wear levelling)
     ESP_ERROR_CHECK(msc_storage_init_spiflash());
 
-    ESP_LOGI(TAG, "Installing TinyUSB driver (MSC device)");
+    ESP_LOGI(TAG, "Installing TinyUSB driver (CDC + MSC composite)");
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device = &s_device_desc;
-    tusb_cfg.descriptor.full_speed_config = s_msc_fs_configuration_desc;
+    tusb_cfg.descriptor.full_speed_config = s_composite_fs_configuration_desc;
     tusb_cfg.descriptor.string = s_string_desc_arr;
     tusb_cfg.descriptor.string_count = sizeof(s_string_desc_arr) / sizeof(s_string_desc_arr[0]);
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "TinyUSB driver installed. When the PC mounts the drive, logging is paused. After safe-eject, logging resumes.");
+
+    // Init USB CDC ACM (creates a COM port on the PC). Route logs/stdout to it.
+    tinyusb_config_cdcacm_t acm_cfg = {
+        .cdc_port = TINYUSB_CDC_ACM_0,
+        .callback_rx = NULL,
+        .callback_rx_wanted_char = NULL,
+        .callback_line_state_changed = NULL,
+        .callback_line_coding_changed = NULL,
+    };
+    ESP_ERROR_CHECK(tinyusb_cdcacm_init(&acm_cfg));
+    ESP_ERROR_CHECK(tinyusb_console_init(TINYUSB_CDC_ACM_0));
 
     if (sensor_err == ESP_OK) {
         xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, NULL);

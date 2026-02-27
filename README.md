@@ -47,3 +47,17 @@ The project uses:
 ## Output (on the USB drive)
 
 - `log.csv`
+
+## Using one USB cable (CDC + MSC)
+
+This firmware enumerates on the **DevKitC-1 USB (native/OTG) port** as:
+
+- **USB Serial (CDC)**: shows up as a COM port (use for `idf.py monitor`)
+- **USB Mass Storage (MSC)**: shows up as a removable drive containing `log.csv`
+
+Notes:
+
+- **Flashing and monitoring are on different COM ports** on Windows:
+  - Flashing uses the ROM download port (often shows as "USB JTAG/serial").
+  - Monitoring uses the CDC COM port created by the application.
+- Logging pauses while the PC has the drive mounted. Use Windows **Eject** to resume logging.
