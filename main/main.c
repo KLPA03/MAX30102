@@ -89,12 +89,17 @@ static bool s_recording_enabled = true;
 
 static TaskHandle_t s_sensor_task = NULL;
 
-#if CONFIG_APP_STATUS_LED_WS2812
-static const gpio_num_t STATUS_LED_GPIO = (gpio_num_t)CONFIG_APP_STATUS_LED_WS2812_GPIO;
-#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
-static const gpio_num_t STATUS_LED_RED_GPIO = (gpio_num_t)CONFIG_APP_STATUS_LED_GPIO_RED;
-static const gpio_num_t STATUS_LED_GREEN_GPIO = (gpio_num_t)CONFIG_APP_STATUS_LED_GPIO_GREEN;
-#endif
+typedef enum {
+    STATUS_LED_KIND_DISABLED = 0,
+    STATUS_LED_KIND_WS2812,
+    STATUS_LED_KIND_GPIO_DUAL,
+} status_led_kind_t;
+
+static status_led_kind_t s_status_led_kind = STATUS_LED_KIND_DISABLED;
+static gpio_num_t s_status_led_ws2812_gpio = GPIO_NUM_NC;
+static gpio_num_t s_status_led_red_gpio = GPIO_NUM_NC;
+static gpio_num_t s_status_led_green_gpio = GPIO_NUM_NC;
+static bool s_status_led_gpio_active_low = true;
 
 static led_strip_handle_t s_led = NULL;
 
@@ -384,18 +389,16 @@ static bool logging_allowed(void)
 
 static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
-#if CONFIG_APP_STATUS_LED_WS2812
+#if CONFIG_APP_STATUS_LED_PRESET_DEVKITC1 || CONFIG_APP_STATUS_LED_PRESET_CUSTOM
+    if (s_status_led_kind != STATUS_LED_KIND_WS2812) {
+        return;
+    }
     if (!s_led) {
         return;
     }
     // led_strip uses RGB order in API regardless of pixel format.
     (void)led_strip_set_pixel(s_led, 0, r, g, b);
     (void)led_strip_refresh(s_led);
-#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
-    (void)r;
-    (void)g;
-    (void)b;
-    // handled by status_led_set_recording()
 #else
     (void)r;
     (void)g;
@@ -405,27 +408,31 @@ static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
 
 static void status_led_set_recording(bool recording_enabled)
 {
-#if CONFIG_APP_STATUS_LED_WS2812
-    if (recording_enabled) {
-        // ON = green
-        status_led_set_rgb(0, 16, 0);
-    } else {
-        // OFF = red
-        status_led_set_rgb(16, 0, 0);
+    if (s_status_led_kind == STATUS_LED_KIND_WS2812) {
+        if (recording_enabled) {
+            // ON = green
+            status_led_set_rgb(0, 16, 0);
+        } else {
+            // OFF = red
+            status_led_set_rgb(16, 0, 0);
+        }
+        return;
     }
-#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
-    bool red_on = !recording_enabled;
-    bool green_on = recording_enabled;
 
-    if (CONFIG_APP_STATUS_LED_GPIO_ACTIVE_LOW) {
-        red_on = !red_on;
-        green_on = !green_on;
+    if (s_status_led_kind == STATUS_LED_KIND_GPIO_DUAL) {
+        bool red_on = !recording_enabled;
+        bool green_on = recording_enabled;
+
+        if (s_status_led_gpio_active_low) {
+            red_on = !red_on;
+            green_on = !green_on;
+        }
+        (void)gpio_set_level(s_status_led_red_gpio, red_on ? 1 : 0);
+        (void)gpio_set_level(s_status_led_green_gpio, green_on ? 1 : 0);
+        return;
     }
-    (void)gpio_set_level(STATUS_LED_RED_GPIO, red_on ? 1 : 0);
-    (void)gpio_set_level(STATUS_LED_GREEN_GPIO, green_on ? 1 : 0);
-#else
+
     (void)recording_enabled;
-#endif
 }
 
 static void recording_toggle_on_boot(void)
@@ -774,49 +781,67 @@ void app_main(void)
     s_log_mutex = xSemaphoreCreateMutex();
 
     // Init status LED (best-effort)
-#if CONFIG_APP_STATUS_LED_WS2812
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = STATUS_LED_GPIO,
-        .max_leds = 1,
-        .led_model = LED_MODEL_WS2812,
-        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
-        .flags.invert_out = false,
-    };
-    led_strip_rmt_config_t rmt_config = {
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = 10 * 1000 * 1000,
-        .mem_block_symbols = 64,
-        .flags.with_dma = false,
-    };
-    esp_err_t led_err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led);
-    if (led_err != ESP_OK) {
-        ESP_LOGW(TAG, "WS2812 status LED init failed (%s) on GPIO%d", esp_err_to_name(led_err), (int)STATUS_LED_GPIO);
-        s_led = NULL;
-    }
-#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
-    gpio_config_t out_cfg = {
-        .pin_bit_mask = (1ULL << (int)STATUS_LED_RED_GPIO) | (1ULL << (int)STATUS_LED_GREEN_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&out_cfg));
-#else
-    // LED disabled
-#endif
-
     recording_toggle_on_boot();
 
+    // Decide LED wiring from preset or custom settings.
+#if CONFIG_APP_STATUS_LED_PRESET_DEVKITC1
+    s_status_led_kind = STATUS_LED_KIND_WS2812;
+    s_status_led_ws2812_gpio = GPIO_NUM_48;
+    ESP_LOGI(TAG, "Status LED preset: DevKitC-1 (WS2812 on GPIO48)");
+#elif CONFIG_APP_STATUS_LED_PRESET_CUSTOM
+    // Custom configuration below
 #if CONFIG_APP_STATUS_LED_WS2812
-    ESP_LOGI(TAG, "Status LED: WS2812 on GPIO%d", (int)STATUS_LED_GPIO);
+    s_status_led_kind = STATUS_LED_KIND_WS2812;
+    s_status_led_ws2812_gpio = (gpio_num_t)CONFIG_APP_STATUS_LED_WS2812_GPIO;
+    ESP_LOGI(TAG, "Status LED: WS2812 on GPIO%d (custom)", (int)s_status_led_ws2812_gpio);
 #elif CONFIG_APP_STATUS_LED_GPIO_DUAL
-    ESP_LOGI(TAG, "Status LED: GPIO dual (RED=GPIO%d, GREEN=GPIO%d, active_%s)",
-             (int)STATUS_LED_RED_GPIO, (int)STATUS_LED_GREEN_GPIO,
-             CONFIG_APP_STATUS_LED_GPIO_ACTIVE_LOW ? "low" : "high");
+    s_status_led_kind = STATUS_LED_KIND_GPIO_DUAL;
+    s_status_led_red_gpio = (gpio_num_t)CONFIG_APP_STATUS_LED_GPIO_RED;
+    s_status_led_green_gpio = (gpio_num_t)CONFIG_APP_STATUS_LED_GPIO_GREEN;
+    s_status_led_gpio_active_low = CONFIG_APP_STATUS_LED_GPIO_ACTIVE_LOW;
+    ESP_LOGI(TAG, "Status LED: GPIO dual (RED=GPIO%d, GREEN=GPIO%d, active_%s) (custom)",
+             (int)s_status_led_red_gpio, (int)s_status_led_green_gpio,
+             s_status_led_gpio_active_low ? "low" : "high");
 #else
+    s_status_led_kind = STATUS_LED_KIND_DISABLED;
+    ESP_LOGI(TAG, "Status LED: disabled (custom)");
+#endif
+#else
+    s_status_led_kind = STATUS_LED_KIND_DISABLED;
     ESP_LOGI(TAG, "Status LED: disabled");
 #endif
+
+    if (s_status_led_kind == STATUS_LED_KIND_WS2812) {
+        led_strip_config_t strip_config = {
+            .strip_gpio_num = s_status_led_ws2812_gpio,
+            .max_leds = 1,
+            .led_model = LED_MODEL_WS2812,
+            .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+            .flags.invert_out = false,
+        };
+        led_strip_rmt_config_t rmt_config = {
+            .clk_src = RMT_CLK_SRC_DEFAULT,
+            .resolution_hz = 10 * 1000 * 1000,
+            .mem_block_symbols = 64,
+            .flags.with_dma = false,
+        };
+        esp_err_t led_err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led);
+        if (led_err != ESP_OK) {
+            ESP_LOGW(TAG, "WS2812 status LED init failed (%s) on GPIO%d",
+                     esp_err_to_name(led_err), (int)s_status_led_ws2812_gpio);
+            s_led = NULL;
+            s_status_led_kind = STATUS_LED_KIND_DISABLED;
+        }
+    } else if (s_status_led_kind == STATUS_LED_KIND_GPIO_DUAL) {
+        gpio_config_t out_cfg = {
+            .pin_bit_mask = (1ULL << (int)s_status_led_red_gpio) | (1ULL << (int)s_status_led_green_gpio),
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK(gpio_config(&out_cfg));
+    }
 
     ESP_LOGI(TAG, "I2C: SDA=GPIO%d SCL=GPIO%d freq=%dHz internal_pullups=%s",
              (int)MAX30102_I2C_SDA_GPIO, (int)MAX30102_I2C_SCL_GPIO, (int)I2C_FREQ_HZ,
