@@ -742,7 +742,8 @@ static int usb_cdc_vprintf(const char *fmt, va_list ap)
     }
 
     // If USB isn't ready yet, fall back to default stdout (usually UART).
-    if (!tud_ready() || !tud_cdc_connected()) {
+    // Note: Some hosts/tools may not assert "connected" line state immediately; writing is still safe.
+    if (!tud_ready()) {
         return vprintf(fmt, ap);
     }
 
@@ -887,6 +888,8 @@ void app_main(void)
     // Route logs to USB CDC without relying on esp_tinyusb helper APIs (they vary across versions).
     if (CONFIG_APP_USB_CDC_CONSOLE) {
         esp_log_set_vprintf(usb_cdc_vprintf);
+        // Print a confirmation line that should appear on the CDC COM port.
+        ESP_LOGI(TAG, "USB CDC logging enabled (this should show on the CDC COM port)");
     }
 
     // Apply mode after USB + storage are initialized.
