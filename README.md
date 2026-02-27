@@ -12,15 +12,14 @@ ESP-IDF v5.x project for ESP32-S3 that:
 
 - **Power**: ESP32-S3 is powered from PC USB.
 - **Sensor**: MAX3010x (MAX30101/MAX30102) via I2C, powered from ESP32-S3 **3.3 V** with common GND.
-- **I2C** (default in `main/main.c`, recommended for ESP32-S3 DevKitC-1):
+- **I2C** (defaults, recommended for ESP32-S3 DevKitC-1):
   - **SDA**: GPIO8
   - **SCL**: GPIO9
-  - Add proper pull-ups (most MAX30102 breakout boards already have them).
+  - Add proper pull-ups (most MAX3010x breakout boards already have them).
 
-If your board uses different pins, edit these defines in `main/main.c`:
+If your board uses different pins or needs a slower I2C clock, configure it via:
 
-- `MAX30102_I2C_SDA_GPIO`
-- `MAX30102_I2C_SCL_GPIO`
+- `idf.py menuconfig` -> **MAX3010x Logger** -> **I2C (MAX3010x)**
 
 ## USB MSC behavior (important)
 
@@ -73,4 +72,8 @@ This firmware uses the **RESET** button as a simple on/off switch by toggling a 
   - Stops recording
   - **Exposes the MSC disk to the PC** so you can copy `log.csv`
 
-On ESP32-S3 DevKitC-1 the status LED is assumed to be the onboard WS2812 on **GPIO48**. If your board differs, change `STATUS_LED_GPIO` in `main/main.c`.
+Status LED configuration is under:
+
+- `idf.py menuconfig` -> **MAX3010x Logger** -> **Status LED**
+
+Defaults assume ESP32-S3 DevKitC-1 style **WS2812 on GPIO48**. If your board has a simple LED (or separate red/green), switch to **Two GPIO LEDs** and set the correct pins.

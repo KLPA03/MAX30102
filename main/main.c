@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdarg.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -10,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "wear_levelling.h"
@@ -17,32 +19,23 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 
+#include "sdkconfig.h"
+
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
-#include "tinyusb_cdc_acm.h"
-#include "tinyusb_console.h"
 #include "tinyusb_msc.h"
+
+#include "tusb.h"
 
 #include "led_strip.h"
 
 // ----------------------------- User config ---------------------------------
 
-// I2C pins (adjust for your ESP32-S3 board)
-#ifndef MAX30102_I2C_SDA_GPIO
-#define MAX30102_I2C_SDA_GPIO  GPIO_NUM_8
-#endif
-
-#ifndef MAX30102_I2C_SCL_GPIO
-#define MAX30102_I2C_SCL_GPIO  GPIO_NUM_9
-#endif
-
-#ifndef MAX30102_I2C_PORT
 #define MAX30102_I2C_PORT      I2C_NUM_0
-#endif
-
 #define MAX30102_I2C_ADDR      0x57
-// 100kHz is much more tolerant of breadboards/long wires and weak pull-ups.
-#define I2C_FREQ_HZ            100000
+#define I2C_FREQ_HZ            CONFIG_APP_I2C_FREQ_HZ
+#define MAX30102_I2C_SDA_GPIO  ((gpio_num_t)CONFIG_APP_I2C_SDA_GPIO)
+#define MAX30102_I2C_SCL_GPIO  ((gpio_num_t)CONFIG_APP_I2C_SCL_GPIO)
 
 #define MSC_FAT_BASE_PATH      "/data"
 
@@ -96,9 +89,11 @@ static bool s_recording_enabled = true;
 
 static TaskHandle_t s_sensor_task = NULL;
 
-// ESP32-S3 DevKitC-1 commonly has a single WS2812 RGB LED on GPIO48.
-#ifndef STATUS_LED_GPIO
-#define STATUS_LED_GPIO GPIO_NUM_48
+#if CONFIG_APP_STATUS_LED_WS2812
+static const gpio_num_t STATUS_LED_GPIO = (gpio_num_t)CONFIG_APP_STATUS_LED_WS2812_GPIO;
+#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
+static const gpio_num_t STATUS_LED_RED_GPIO = (gpio_num_t)CONFIG_APP_STATUS_LED_GPIO_RED;
+static const gpio_num_t STATUS_LED_GREEN_GPIO = (gpio_num_t)CONFIG_APP_STATUS_LED_GPIO_GREEN;
 #endif
 
 static led_strip_handle_t s_led = NULL;
@@ -107,6 +102,96 @@ static led_strip_handle_t s_led = NULL;
 
 #define I2C_XFER_TIMEOUT_MS  100
 #define I2C_RETRY_COUNT      3
+
+static void i2c_bus_unlock_gpio(gpio_num_t sda, gpio_num_t scl)
+{
+#if CONFIG_APP_I2C_RECOVERY_ENABLED
+    // Best-effort "bus unstick" sequence:
+    // - release SDA
+    // - toggle SCL up to 9 pulses to advance any stuck slave
+    // - generate a STOP
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << (int)sda) | (1ULL << (int)scl),
+        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    (void)gpio_config(&cfg);
+
+    (void)gpio_set_level(sda, 1);
+    (void)gpio_set_level(scl, 1);
+    ets_delay_us(5);
+
+    for (int i = 0; i < 9; i++) {
+        (void)gpio_set_level(scl, 0);
+        ets_delay_us(5);
+        (void)gpio_set_level(scl, 1);
+        ets_delay_us(5);
+        if (gpio_get_level(sda) == 1) {
+            break;
+        }
+    }
+
+    // STOP: SDA low -> SCL high -> SDA high
+    (void)gpio_set_level(sda, 0);
+    ets_delay_us(5);
+    (void)gpio_set_level(scl, 1);
+    ets_delay_us(5);
+    (void)gpio_set_level(sda, 1);
+    ets_delay_us(5);
+#else
+    (void)sda;
+    (void)scl;
+#endif
+}
+
+static esp_err_t max3010x_i2c_reinit(void)
+{
+#if CONFIG_APP_I2C_RECOVERY_ENABLED
+    ESP_LOGW(TAG, "Re-initializing I2C bus + MAX3010x (recovery)");
+
+    if (s_max30102) {
+        (void)i2c_master_bus_rm_device(s_max30102);
+        s_max30102 = NULL;
+    }
+    if (s_i2c_bus) {
+        (void)i2c_del_master_bus(s_i2c_bus);
+        s_i2c_bus = NULL;
+    }
+
+    i2c_bus_unlock_gpio(MAX30102_I2C_SDA_GPIO, MAX30102_I2C_SCL_GPIO);
+
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = MAX30102_I2C_PORT,
+        .sda_io_num = MAX30102_I2C_SDA_GPIO,
+        .scl_io_num = MAX30102_I2C_SCL_GPIO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .trans_queue_depth = 0,
+        .flags.enable_internal_pullup = CONFIG_APP_I2C_ENABLE_INTERNAL_PULLUPS,
+    };
+    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_i2c_bus), TAG, "i2c_new_master_bus failed");
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = MAX30102_I2C_ADDR,
+        .scl_speed_hz = I2C_FREQ_HZ,
+        .scl_wait_us = 50000,
+    };
+    ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_max30102), TAG, "add device failed");
+
+    if (!i2c_probe_max3010x()) {
+        ESP_LOGW(TAG, "I2C probe still failing after recovery");
+        return ESP_FAIL;
+    }
+
+    return max30102_init_100hz();
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
 
 static bool i2c_probe_max3010x(void)
 {
@@ -134,7 +219,7 @@ static esp_err_t i2c_reg_write_u8(i2c_master_dev_handle_t dev, uint8_t reg, uint
         if (s_i2c_bus) {
             (void)i2c_master_bus_reset(s_i2c_bus);
         }
-        vTaskDelay(pdMS_TO_TICKS(2));
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
     return err;
 }
@@ -150,7 +235,7 @@ static esp_err_t i2c_reg_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t 
         if (s_i2c_bus) {
             (void)i2c_master_bus_reset(s_i2c_bus);
         }
-        vTaskDelay(pdMS_TO_TICKS(2));
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
     return err;
 }
@@ -184,7 +269,7 @@ static esp_err_t max30102_init_100hz(void)
     uint8_t part_id = 0;
     esp_err_t err = max30102_read_u8(MAX30102_REG_PART_ID, &part_id);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "MAX3010x PART_ID=0x%02X (0x15 indicates MAX30102)", part_id);
+        ESP_LOGI(TAG, "MAX3010x PART_ID=0x%02X (0x11=MAX30101, 0x15=MAX30102)", part_id);
     } else {
         ESP_LOGW(TAG, "Unable to read MAX30102 PART_ID (%s)", esp_err_to_name(err));
     }
@@ -299,16 +384,28 @@ static bool logging_allowed(void)
 
 static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
+#if CONFIG_APP_STATUS_LED_WS2812
     if (!s_led) {
         return;
     }
     // led_strip uses RGB order in API regardless of pixel format.
     (void)led_strip_set_pixel(s_led, 0, r, g, b);
     (void)led_strip_refresh(s_led);
+#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
+    (void)r;
+    (void)g;
+    (void)b;
+    // handled by status_led_set_recording()
+#else
+    (void)r;
+    (void)g;
+    (void)b;
+#endif
 }
 
 static void status_led_set_recording(bool recording_enabled)
 {
+#if CONFIG_APP_STATUS_LED_WS2812
     if (recording_enabled) {
         // ON = green
         status_led_set_rgb(0, 16, 0);
@@ -316,6 +413,19 @@ static void status_led_set_recording(bool recording_enabled)
         // OFF = red
         status_led_set_rgb(16, 0, 0);
     }
+#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
+    bool red_on = !recording_enabled;
+    bool green_on = recording_enabled;
+
+    if (CONFIG_APP_STATUS_LED_GPIO_ACTIVE_LOW) {
+        red_on = !red_on;
+        green_on = !green_on;
+    }
+    (void)gpio_set_level(STATUS_LED_RED_GPIO, red_on ? 1 : 0);
+    (void)gpio_set_level(STATUS_LED_GREEN_GPIO, green_on ? 1 : 0);
+#else
+    (void)recording_enabled;
+#endif
 }
 
 static void recording_toggle_on_boot(void)
@@ -467,6 +577,10 @@ static void sensor_task(void *arg)
     uint64_t acc_red = 0;
     int acc_n = 0;
     int consecutive_i2c_errors = 0;
+    uint32_t last_recover_ms = 0;
+
+    const int max_samples_per_bulk = 10;
+    uint8_t fifo_bulk[6 * 10];
 
     while (true) {
         uint8_t unread = 0;
@@ -474,66 +588,94 @@ static void sensor_task(void *arg)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "FIFO ptr read failed (%s)", esp_err_to_name(err));
             consecutive_i2c_errors++;
-            if (consecutive_i2c_errors >= 10) {
-                ESP_LOGW(TAG, "Too many I2C errors, re-initializing MAX3010x...");
-                (void)max30102_init_100hz();
+            if (consecutive_i2c_errors >= 5) {
+                uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                if ((now_ms - last_recover_ms) > 1000) {
+                    (void)max3010x_i2c_reinit();
+                    last_recover_ms = now_ms;
+                }
                 consecutive_i2c_errors = 0;
             }
-            vTaskDelay(pdMS_TO_TICKS(10));
+            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
         consecutive_i2c_errors = 0;
 
         if (unread == 0) {
-            vTaskDelay(pdMS_TO_TICKS(5));
+            // Let FIFO accumulate to reduce I2C traffic and improve robustness.
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
-        for (uint8_t i = 0; i < unread; i++) {
-            uint32_t ir = 0, red = 0;
-            err = max30102_read_fifo_sample(&ir, &red);
+        // Read FIFO in small bulks to reduce I2C start/stop overhead.
+        uint8_t remaining = unread;
+        while (remaining > 0) {
+            uint8_t n = remaining;
+            if (n > (uint8_t)max_samples_per_bulk) {
+                n = (uint8_t)max_samples_per_bulk;
+            }
+            const size_t bytes = (size_t)n * 6;
+            err = i2c_reg_read(s_max30102, MAX30102_REG_FIFO_DATA, fifo_bulk, bytes);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "FIFO sample read failed (%s)", esp_err_to_name(err));
+                ESP_LOGW(TAG, "FIFO bulk read failed (%s)", esp_err_to_name(err));
                 consecutive_i2c_errors++;
+                if (consecutive_i2c_errors >= 5) {
+                    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                    if ((now_ms - last_recover_ms) > 1000) {
+                        (void)max3010x_i2c_reinit();
+                        last_recover_ms = now_ms;
+                    }
+                    consecutive_i2c_errors = 0;
+                }
                 break;
             }
             consecutive_i2c_errors = 0;
 
-            acc_ir += ir;
-            acc_red += red;
-            acc_n++;
+            for (uint8_t i = 0; i < n; i++) {
+                const uint8_t *d = &fifo_bulk[i * 6];
+                uint32_t raw_red = ((uint32_t)d[0] << 16) | ((uint32_t)d[1] << 8) | d[2];
+                uint32_t raw_ir  = ((uint32_t)d[3] << 16) | ((uint32_t)d[4] << 8) | d[5];
+                raw_red &= 0x3FFFF;
+                raw_ir &= 0x3FFFF;
 
-            if (acc_n >= DOWNSAMPLE_FACTOR) {
-                uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
-                uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
-                uint64_t t_ms = (uint64_t)(esp_timer_get_time() / 1000);
+                acc_ir += raw_ir;
+                acc_red += raw_red;
+                acc_n++;
 
-                ESP_LOGI(TAG, "time_ms=%"PRIu64" IR=%"PRIu32" RED=%"PRIu32"%s",
-                         t_ms, ir_ds, red_ds, logging_allowed() ? "" : " (paused)");
+                if (acc_n >= DOWNSAMPLE_FACTOR) {
+                    uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
+                    uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
+                    uint64_t t_ms = (uint64_t)(esp_timer_get_time() / 1000);
 
-                if (logging_allowed() && s_log_mutex) {
-                    if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                        // MSC/FAT log (only when storage is mounted to APP)
-                        if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
-                            ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
+                    ESP_LOGI(TAG, "time_ms=%"PRIu64" IR=%"PRIu32" RED=%"PRIu32"%s",
+                             t_ms, ir_ds, red_ds, logging_allowed() ? "" : " (paused)");
+
+                    if (logging_allowed() && s_log_mutex) {
+                        if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                            // MSC/FAT log (only when storage is mounted to APP)
+                            if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
+                                ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
+                            }
+
+                            if (s_log_msc) {
+                                fprintf(s_log_msc, "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_ds, red_ds);
+                                fflush(s_log_msc);
+                            }
+                            xSemaphoreGive(s_log_mutex);
                         }
-
-                        if (s_log_msc) {
-                            fprintf(s_log_msc, "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_ds, red_ds);
-                            fflush(s_log_msc);
-                        }
-                        xSemaphoreGive(s_log_mutex);
                     }
-                }
 
-                acc_ir = 0;
-                acc_red = 0;
-                acc_n = 0;
+                    acc_ir = 0;
+                    acc_red = 0;
+                    acc_n = 0;
+                }
             }
+
+            remaining = (uint8_t)(remaining - n);
         }
 
-        // Yield; FIFO can contain multiple samples if task was delayed.
-        vTaskDelay(pdMS_TO_TICKS(2));
+        // Let FIFO accumulate a bit; avoids hammering I2C.
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -592,6 +734,39 @@ static uint8_t const s_composite_fs_configuration_desc[] = {
 
 // ----------------------------- app_main -------------------------------------
 
+static int usb_cdc_vprintf(const char *fmt, va_list ap)
+{
+    // Format first (doesn't consume 'ap' since we use a copy)
+    char buf[256];
+    va_list ap_copy;
+    va_copy(ap_copy, ap);
+    int len = vsnprintf(buf, sizeof(buf), fmt, ap_copy);
+    va_end(ap_copy);
+
+    if (!CONFIG_APP_USB_CDC_CONSOLE) {
+        return vprintf(fmt, ap);
+    }
+
+    // If USB isn't ready yet, fall back to default stdout (usually UART).
+    if (!tud_ready() || !tud_cdc_connected()) {
+        return vprintf(fmt, ap);
+    }
+
+    if (len <= 0) {
+        return len;
+    }
+
+    size_t n = (size_t)len;
+    if (n > sizeof(buf)) {
+        n = sizeof(buf);
+    }
+
+    // Non-blocking write: TinyUSB buffers internally.
+    (void)tud_cdc_write(buf, n);
+    (void)tud_cdc_write_flush();
+    return len;
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Booting");
@@ -599,6 +774,7 @@ void app_main(void)
     s_log_mutex = xSemaphoreCreateMutex();
 
     // Init status LED (best-effort)
+#if CONFIG_APP_STATUS_LED_WS2812
     led_strip_config_t strip_config = {
         .strip_gpio_num = STATUS_LED_GPIO,
         .max_leds = 1,
@@ -614,11 +790,42 @@ void app_main(void)
     };
     esp_err_t led_err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led);
     if (led_err != ESP_OK) {
-        ESP_LOGW(TAG, "Status LED init failed (%s) on GPIO%d", esp_err_to_name(led_err), (int)STATUS_LED_GPIO);
+        ESP_LOGW(TAG, "WS2812 status LED init failed (%s) on GPIO%d", esp_err_to_name(led_err), (int)STATUS_LED_GPIO);
         s_led = NULL;
     }
+#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
+    gpio_config_t out_cfg = {
+        .pin_bit_mask = (1ULL << (int)STATUS_LED_RED_GPIO) | (1ULL << (int)STATUS_LED_GREEN_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&out_cfg));
+#else
+    // LED disabled
+#endif
 
     recording_toggle_on_boot();
+
+#if CONFIG_APP_STATUS_LED_WS2812
+    ESP_LOGI(TAG, "Status LED: WS2812 on GPIO%d", (int)STATUS_LED_GPIO);
+#elif CONFIG_APP_STATUS_LED_GPIO_DUAL
+    ESP_LOGI(TAG, "Status LED: GPIO dual (RED=GPIO%d, GREEN=GPIO%d, active_%s)",
+             (int)STATUS_LED_RED_GPIO, (int)STATUS_LED_GREEN_GPIO,
+             CONFIG_APP_STATUS_LED_GPIO_ACTIVE_LOW ? "low" : "high");
+#else
+    ESP_LOGI(TAG, "Status LED: disabled");
+#endif
+
+    ESP_LOGI(TAG, "I2C: SDA=GPIO%d SCL=GPIO%d freq=%dHz internal_pullups=%s",
+             (int)MAX30102_I2C_SDA_GPIO, (int)MAX30102_I2C_SCL_GPIO, (int)I2C_FREQ_HZ,
+             CONFIG_APP_I2C_ENABLE_INTERNAL_PULLUPS ? "on" : "off");
+
+    if (CONFIG_APP_SUPPRESS_IDF_I2C_MASTER_ERRORS) {
+        // IDF prints an ESP_LOGE for each failed transaction; mute to keep the console usable.
+        esp_log_level_set("i2c.master", ESP_LOG_NONE);
+    }
 
     // I2C init (new driver, ESP-IDF v5.x)
     i2c_master_bus_config_t bus_cfg = {
@@ -630,7 +837,7 @@ void app_main(void)
         .intr_priority = 0,
         // Use synchronous transactions (more reliable for sensor bring-up and gives bus errors)
         .trans_queue_depth = 0,
-        .flags.enable_internal_pullup = true,
+        .flags.enable_internal_pullup = CONFIG_APP_I2C_ENABLE_INTERNAL_PULLUPS,
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &s_i2c_bus));
 
@@ -665,16 +872,10 @@ void app_main(void)
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
     ESP_LOGI(TAG, "TinyUSB driver installed. When the PC mounts the drive, logging is paused. After safe-eject, logging resumes.");
 
-    // Init USB CDC ACM (creates a COM port on the PC). Route logs/stdout to it.
-    tinyusb_config_cdcacm_t acm_cfg = {
-        .cdc_port = TINYUSB_CDC_ACM_0,
-        .callback_rx = NULL,
-        .callback_rx_wanted_char = NULL,
-        .callback_line_state_changed = NULL,
-        .callback_line_coding_changed = NULL,
-    };
-    ESP_ERROR_CHECK(tinyusb_cdcacm_init(&acm_cfg));
-    ESP_ERROR_CHECK(tinyusb_console_init(TINYUSB_CDC_ACM_0));
+    // Route logs to USB CDC without relying on esp_tinyusb helper APIs (they vary across versions).
+    if (CONFIG_APP_USB_CDC_CONSOLE) {
+        esp_log_set_vprintf(usb_cdc_vprintf);
+    }
 
     // Apply mode after USB + storage are initialized.
     apply_recording_mode();
