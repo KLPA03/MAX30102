@@ -108,6 +108,10 @@ static led_strip_handle_t s_led = NULL;
 #define I2C_XFER_TIMEOUT_MS  100
 #define I2C_RETRY_COUNT      3
 
+// Forward declarations (needed for recovery path)
+static bool i2c_probe_max3010x(void);
+static esp_err_t max30102_init_100hz(void);
+
 static void i2c_bus_unlock_gpio(gpio_num_t sda, gpio_num_t scl)
 {
 #if CONFIG_APP_I2C_RECOVERY_ENABLED
@@ -126,13 +130,13 @@ static void i2c_bus_unlock_gpio(gpio_num_t sda, gpio_num_t scl)
 
     (void)gpio_set_level(sda, 1);
     (void)gpio_set_level(scl, 1);
-    ets_delay_us(5);
+    esp_rom_delay_us(5);
 
     for (int i = 0; i < 9; i++) {
         (void)gpio_set_level(scl, 0);
-        ets_delay_us(5);
+        esp_rom_delay_us(5);
         (void)gpio_set_level(scl, 1);
-        ets_delay_us(5);
+        esp_rom_delay_us(5);
         if (gpio_get_level(sda) == 1) {
             break;
         }
@@ -140,11 +144,11 @@ static void i2c_bus_unlock_gpio(gpio_num_t sda, gpio_num_t scl)
 
     // STOP: SDA low -> SCL high -> SDA high
     (void)gpio_set_level(sda, 0);
-    ets_delay_us(5);
+    esp_rom_delay_us(5);
     (void)gpio_set_level(scl, 1);
-    ets_delay_us(5);
+    esp_rom_delay_us(5);
     (void)gpio_set_level(sda, 1);
-    ets_delay_us(5);
+    esp_rom_delay_us(5);
 #else
     (void)sda;
     (void)scl;
@@ -322,23 +326,6 @@ static esp_err_t max30102_get_unread_samples(uint8_t *unread)
     uint8_t wr = ptrs[0] & 0x1F;
     uint8_t rd = ptrs[2] & 0x1F;
     *unread = (uint8_t)((wr - rd) & 0x1F);
-    return ESP_OK;
-}
-
-static esp_err_t max30102_read_fifo_sample(uint32_t *ir, uint32_t *red)
-{
-    uint8_t data[6] = {0};
-    ESP_RETURN_ON_ERROR(i2c_reg_read(s_max30102, MAX30102_REG_FIFO_DATA, data, sizeof(data)),
-                        TAG, "fifo read failed");
-
-    // In SpO2 mode: FIFO contains RED then IR, 3 bytes each (18 bits used).
-    uint32_t raw_red = ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
-    uint32_t raw_ir  = ((uint32_t)data[3] << 16) | ((uint32_t)data[4] << 8) | data[5];
-    raw_red &= 0x3FFFF;
-    raw_ir  &= 0x3FFFF;
-
-    *red = raw_red;
-    *ir = raw_ir;
     return ESP_OK;
 }
 
