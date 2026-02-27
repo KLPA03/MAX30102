@@ -614,6 +614,13 @@ static void sensor_task(void *arg)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "FIFO ptr read failed (%s)", esp_err_to_name(err));
             consecutive_i2c_errors++;
+            if (err == ESP_ERR_INVALID_STATE) {
+                // Driver reports bus not idle / invalid state: recover immediately.
+                (void)max3010x_i2c_reinit();
+                consecutive_i2c_errors = 0;
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
             if (consecutive_i2c_errors >= 5) {
                 uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
                 if ((now_ms - last_recover_ms) > 1000) {
@@ -645,6 +652,12 @@ static void sensor_task(void *arg)
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "FIFO bulk read failed (%s)", esp_err_to_name(err));
                 consecutive_i2c_errors++;
+                if (err == ESP_ERR_INVALID_STATE) {
+                    // Bus stuck / not idle. Recover immediately instead of spamming retries.
+                    (void)max3010x_i2c_reinit();
+                    consecutive_i2c_errors = 0;
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                }
                 if (consecutive_i2c_errors >= 5) {
                     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
                     if ((now_ms - last_recover_ms) > 1000) {
