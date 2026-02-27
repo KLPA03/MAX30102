@@ -203,7 +203,13 @@ static esp_err_t max3010x_i2c_reinit(void)
         return ESP_FAIL;
     }
 
-    return max30102_init_100hz();
+    esp_err_t err = max30102_init_100hz();
+    // Give sensor/bus a moment to settle after reconfig; helps avoid immediate follow-up failures.
+    vTaskDelay(pdMS_TO_TICKS(50));
+    // Best-effort clear of FIFO pointers right after init.
+    uint8_t tmp = 0;
+    (void)max30102_get_unread_samples(&tmp);
+    return err;
 #else
     return ESP_ERR_NOT_SUPPORTED;
 #endif
@@ -604,25 +610,49 @@ static void sensor_task(void *arg)
     int acc_n = 0;
     int consecutive_i2c_errors = 0;
     uint32_t last_recover_ms = 0;
+    uint32_t invalid_state_backoff_until_ms = 0;
+    uint32_t invalid_state_count_window_start_ms = 0;
+    int invalid_state_count_in_window = 0;
 
     const int max_samples_per_bulk = 10;
     uint8_t fifo_bulk[6 * 10];
 
     while (true) {
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (invalid_state_backoff_until_ms && (now_ms < invalid_state_backoff_until_ms)) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
         uint8_t unread = 0;
         esp_err_t err = max30102_get_unread_samples(&unread);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "FIFO ptr read failed (%s)", esp_err_to_name(err));
             consecutive_i2c_errors++;
             if (err == ESP_ERR_INVALID_STATE) {
-                // Driver reports bus not idle / invalid state: recover immediately.
-                (void)max3010x_i2c_reinit();
+                // Driver reports bus not idle / invalid state (often SDA/SCL stuck low).
+                // Do not hammer recovery continuously; use a short window + backoff.
+                if ((now_ms - invalid_state_count_window_start_ms) > 3000) {
+                    invalid_state_count_window_start_ms = now_ms;
+                    invalid_state_count_in_window = 0;
+                }
+                invalid_state_count_in_window++;
+
+                if ((now_ms - last_recover_ms) > 500) {
+                    (void)max3010x_i2c_reinit();
+                    last_recover_ms = now_ms;
+                }
+
+                // If it keeps happening, pause polling for a bit to let the bus recover electrically.
+                if (invalid_state_count_in_window >= 5) {
+                    invalid_state_backoff_until_ms = now_ms + 2000;
+                    invalid_state_count_in_window = 0;
+                }
+
                 consecutive_i2c_errors = 0;
-                vTaskDelay(pdMS_TO_TICKS(50));
                 continue;
             }
             if (consecutive_i2c_errors >= 5) {
-                uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
                 if ((now_ms - last_recover_ms) > 1000) {
                     (void)max3010x_i2c_reinit();
                     last_recover_ms = now_ms;
@@ -654,12 +684,24 @@ static void sensor_task(void *arg)
                 consecutive_i2c_errors++;
                 if (err == ESP_ERR_INVALID_STATE) {
                     // Bus stuck / not idle. Recover immediately instead of spamming retries.
-                    (void)max3010x_i2c_reinit();
+                    if ((now_ms - invalid_state_count_window_start_ms) > 3000) {
+                        invalid_state_count_window_start_ms = now_ms;
+                        invalid_state_count_in_window = 0;
+                    }
+                    invalid_state_count_in_window++;
+
+                    if ((now_ms - last_recover_ms) > 500) {
+                        (void)max3010x_i2c_reinit();
+                        last_recover_ms = now_ms;
+                    }
+                    if (invalid_state_count_in_window >= 5) {
+                        invalid_state_backoff_until_ms = now_ms + 2000;
+                        invalid_state_count_in_window = 0;
+                    }
+
                     consecutive_i2c_errors = 0;
-                    vTaskDelay(pdMS_TO_TICKS(50));
                 }
                 if (consecutive_i2c_errors >= 5) {
-                    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
                     if ((now_ms - last_recover_ms) > 1000) {
                         (void)max3010x_i2c_reinit();
                         last_recover_ms = now_ms;
