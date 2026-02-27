@@ -48,9 +48,27 @@ menu "MAX3010x Logger"
     endmenu
 
     menu "Status LED"
+        choice APP_STATUS_LED_PRESET
+            prompt "Board LED preset"
+            default APP_STATUS_LED_PRESET_DEVKITC1
+            help
+                If your LED is on-board ("embedded"), pick a preset for your dev board so you don't need to
+                know the GPIO. If your board isn't listed, choose Custom and set the LED wiring manually.
+
+            config APP_STATUS_LED_PRESET_DEVKITC1
+                bool "ESP32-S3 DevKitC-1 onboard RGB (WS2812 on GPIO48)"
+
+            config APP_STATUS_LED_PRESET_CUSTOM
+                bool "Custom (set LED type/pins below)"
+
+            config APP_STATUS_LED_PRESET_DISABLED
+                bool "Disabled"
+        endchoice
+
         choice APP_STATUS_LED_MODE
             prompt "LED type"
             default APP_STATUS_LED_WS2812
+            depends on APP_STATUS_LED_PRESET_CUSTOM
             help
                 Select how to drive the on-board status LED.
 
@@ -68,7 +86,7 @@ menu "MAX3010x Logger"
             int "WS2812 GPIO"
             range 0 48
             default 48
-            depends on APP_STATUS_LED_WS2812
+            depends on APP_STATUS_LED_WS2812 && APP_STATUS_LED_PRESET_CUSTOM
             help
                 GPIO connected to the WS2812 data input.
 
@@ -76,7 +94,7 @@ menu "MAX3010x Logger"
             int "RED LED GPIO"
             range 0 48
             default 1
-            depends on APP_STATUS_LED_GPIO_DUAL
+            depends on APP_STATUS_LED_GPIO_DUAL && APP_STATUS_LED_PRESET_CUSTOM
             help
                 GPIO connected to the RED indicator LED.
 
@@ -84,14 +102,14 @@ menu "MAX3010x Logger"
             int "GREEN LED GPIO"
             range 0 48
             default 2
-            depends on APP_STATUS_LED_GPIO_DUAL
+            depends on APP_STATUS_LED_GPIO_DUAL && APP_STATUS_LED_PRESET_CUSTOM
             help
                 GPIO connected to the GREEN indicator LED.
 
         config APP_STATUS_LED_GPIO_ACTIVE_LOW
             bool "GPIO LEDs are active-low"
             default y
-            depends on APP_STATUS_LED_GPIO_DUAL
+            depends on APP_STATUS_LED_GPIO_DUAL && APP_STATUS_LED_PRESET_CUSTOM
             help
                 Enable if the LED turns ON when the GPIO is driven LOW (common-anode LEDs).
     endmenu
