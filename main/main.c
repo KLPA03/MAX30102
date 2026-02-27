@@ -367,8 +367,8 @@ static void storage_mount_changed_cb(tinyusb_msc_storage_handle_t handle, tinyus
     case TINYUSB_MSC_EVENT_MOUNT_COMPLETE:
         s_msc_mount_point = event->mount_point;
         s_msc_transition = false;
-        ESP_LOGI(TAG, "MSC storage owner now: %s",
-                 (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) ? "APP (logging allowed)" : "USB HOST (logging paused)");
+        ESP_LOGI(TAG, "MSC disk state: %s",
+                 (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) ? "HIDDEN (APP owns disk)" : "EXPOSED (USB host owns disk)");
         break;
     case TINYUSB_MSC_EVENT_FORMAT_REQUIRED:
         ESP_LOGW(TAG, "MSC storage needs formatting (will be auto-formatted on mount if allowed)");
@@ -396,6 +396,20 @@ static esp_err_t msc_storage_init_spiflash(void)
              fat_part->label, fat_part->address, fat_part->size);
     ESP_RETURN_ON_ERROR(wl_mount(fat_part, &s_wl_handle), TAG, "wl_mount failed");
 
+    // Disable TinyUSB auto-mount switching. We fully control whether the disk is exposed to the PC.
+    // This is required so "recording ON" never pauses due to Windows auto-mounting the drive.
+    const tinyusb_msc_driver_config_t drv_cfg = {
+        .user_flags = {
+            .auto_mount_off = 1,
+        },
+        .callback = storage_mount_changed_cb,
+        .callback_arg = NULL,
+    };
+    esp_err_t drv_err = tinyusb_msc_install_driver(&drv_cfg);
+    if (drv_err != ESP_OK && drv_err != ESP_ERR_INVALID_STATE) {
+        ESP_RETURN_ON_ERROR(drv_err, TAG, "tinyusb_msc_install_driver failed");
+    }
+
     // Mount point is controlled by our "recording mode" logic after init.
     tinyusb_msc_storage_config_t storage_cfg = {
         .mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP,
@@ -413,7 +427,6 @@ static esp_err_t msc_storage_init_spiflash(void)
     storage_cfg.medium.wl_handle = s_wl_handle;
 
     ESP_RETURN_ON_ERROR(tinyusb_msc_new_storage_spiflash(&storage_cfg, &s_msc_storage), TAG, "new_storage_spiflash failed");
-    ESP_RETURN_ON_ERROR(tinyusb_msc_set_storage_callback(storage_mount_changed_cb, NULL), TAG, "set_storage_callback failed");
 
     return ESP_OK;
 }
