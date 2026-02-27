@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <stdarg.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -82,6 +83,11 @@ static volatile bool s_msc_transition = false;
 
 static SemaphoreHandle_t s_log_mutex;
 static FILE *s_log_msc = NULL;
+static int s_log_lines_since_reopen = 0;
+
+// Closing the file periodically makes FAT metadata robust against sudden RESET.
+// Trade-off: more directory updates, but much less chance of garbage tail bytes.
+#define LOG_REOPEN_EVERY_N_LINES  20
 
 // Recording mode toggled by RESET button:
 // - recording ON  -> GREEN LED, MSC drive hidden (no log.csv on PC), data appended to /data/log.csv
@@ -354,10 +360,32 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
     if (!*fp) {
         return ESP_FAIL;
     }
-    fprintf(*fp, "time_ms,IR,RED\n");
+    (void)setvbuf(*fp, NULL, _IONBF, 0);
+    const char *hdr = "time_ms,IR,RED\n";
+    if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
+        fclose(*fp);
+        *fp = NULL;
+        return ESP_FAIL;
+    }
     fflush(*fp);
     (void)fsync(fileno(*fp));
     return ESP_OK;
+}
+
+static void log_reopen_if_needed(void)
+{
+    if (!s_log_msc) {
+        return;
+    }
+    if (s_log_lines_since_reopen < LOG_REOPEN_EVERY_N_LINES) {
+        return;
+    }
+    // Close to ensure directory entry (file size) is committed.
+    fflush(s_log_msc);
+    (void)fsync(fileno(s_log_msc));
+    fclose(s_log_msc);
+    s_log_msc = NULL;
+    s_log_lines_since_reopen = 0;
 }
 
 static void log_close_all(void)
@@ -368,6 +396,7 @@ static void log_close_all(void)
         fclose(s_log_msc);
         s_log_msc = NULL;
     }
+    s_log_lines_since_reopen = 0;
 }
 
 static bool logging_allowed(void)
@@ -655,9 +684,20 @@ static void sensor_task(void *arg)
                             }
 
                             if (s_log_msc) {
-                                fprintf(s_log_msc, "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_ds, red_ds);
+                                char line[64];
+                                int len = snprintf(line, sizeof(line), "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_ds, red_ds);
+                                if (len > 0 && len < (int)sizeof(line)) {
+                                    size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
+                                    if (w != (size_t)len) {
+                                        ESP_LOGW(TAG, "MSC log write failed (errno=%d)", errno);
+                                    }
+                                } else {
+                                    ESP_LOGW(TAG, "MSC log line format overflow");
+                                }
                                 fflush(s_log_msc);
                                 (void)fsync(fileno(s_log_msc));
+                                s_log_lines_since_reopen++;
+                                log_reopen_if_needed();
                             }
                             xSemaphoreGive(s_log_mutex);
                         }
