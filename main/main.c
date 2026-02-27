@@ -2,6 +2,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <stdarg.h>
+#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -355,6 +356,7 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
     }
     fprintf(*fp, "time_ms,IR,RED\n");
     fflush(*fp);
+    (void)fsync(fileno(*fp));
     return ESP_OK;
 }
 
@@ -362,6 +364,7 @@ static void log_close_all(void)
 {
     if (s_log_msc) {
         fflush(s_log_msc);
+        (void)fsync(fileno(s_log_msc));
         fclose(s_log_msc);
         s_log_msc = NULL;
     }
@@ -654,6 +657,7 @@ static void sensor_task(void *arg)
                             if (s_log_msc) {
                                 fprintf(s_log_msc, "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_ds, red_ds);
                                 fflush(s_log_msc);
+                                (void)fsync(fileno(s_log_msc));
                             }
                             xSemaphoreGive(s_log_mutex);
                         }
