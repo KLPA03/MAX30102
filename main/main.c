@@ -10,6 +10,8 @@
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_timer.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "wear_levelling.h"
 
 #include "driver/gpio.h"
@@ -20,6 +22,8 @@
 #include "tinyusb_cdc_acm.h"
 #include "tinyusb_console.h"
 #include "tinyusb_msc.h"
+
+#include "led_strip.h"
 
 // ----------------------------- User config ---------------------------------
 
@@ -84,6 +88,20 @@ static volatile bool s_msc_transition = false;
 
 static SemaphoreHandle_t s_log_mutex;
 static FILE *s_log_msc = NULL;
+
+// Recording mode toggled by RESET button:
+// - recording ON  -> GREEN LED, MSC drive hidden (no log.csv on PC), data appended to /data/log.csv
+// - recording OFF -> RED LED, MSC drive exposed to PC, no recording
+static bool s_recording_enabled = true;
+
+static TaskHandle_t s_sensor_task = NULL;
+
+// ESP32-S3 DevKitC-1 commonly has a single WS2812 RGB LED on GPIO48.
+#ifndef STATUS_LED_GPIO
+#define STATUS_LED_GPIO GPIO_NUM_48
+#endif
+
+static led_strip_handle_t s_led = NULL;
 
 // ----------------------------- I2C helpers ---------------------------------
 
@@ -274,7 +292,61 @@ static void log_close_all(void)
 
 static bool logging_allowed(void)
 {
-    return (!s_msc_transition) && (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP);
+    return s_recording_enabled &&
+           (!s_msc_transition) &&
+           (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP);
+}
+
+static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!s_led) {
+        return;
+    }
+    // led_strip uses RGB order in API regardless of pixel format.
+    (void)led_strip_set_pixel(s_led, 0, r, g, b);
+    (void)led_strip_refresh(s_led);
+}
+
+static void status_led_set_recording(bool recording_enabled)
+{
+    if (recording_enabled) {
+        // ON = green
+        status_led_set_rgb(0, 16, 0);
+    } else {
+        // OFF = red
+        status_led_set_rgb(16, 0, 0);
+    }
+}
+
+static void recording_toggle_on_boot(void)
+{
+    // Toggle persistent state on every boot (RESET acts like an on/off switch).
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    } else {
+        ESP_ERROR_CHECK(err);
+    }
+
+    nvs_handle_t h;
+    ESP_ERROR_CHECK(nvs_open("app", NVS_READWRITE, &h));
+
+    uint8_t v = 0;
+    err = nvs_get_u8(h, "rec", &v);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        v = 0; // so first boot toggles to ON
+    } else {
+        ESP_ERROR_CHECK(err);
+    }
+
+    v = (uint8_t)(!v);
+    ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
+    ESP_ERROR_CHECK(nvs_commit(h));
+    nvs_close(h);
+
+    s_recording_enabled = (v != 0);
+    ESP_LOGI(TAG, "Recording mode: %s (toggled by RESET)", s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
 }
 
 static void storage_mount_changed_cb(tinyusb_msc_storage_handle_t handle, tinyusb_msc_event_t *event, void *arg)
@@ -324,9 +396,8 @@ static esp_err_t msc_storage_init_spiflash(void)
              fat_part->label, fat_part->address, fat_part->size);
     ESP_RETURN_ON_ERROR(wl_mount(fat_part, &s_wl_handle), TAG, "wl_mount failed");
 
+    // Mount point is controlled by our "recording mode" logic after init.
     tinyusb_msc_storage_config_t storage_cfg = {
-        // Start mounted to APP, so logging runs when no host is using the drive.
-        // When the USB host connects and mounts, TinyUSB will switch ownership to USB automatically.
         .mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP,
         .fat_fs = {
             .base_path = MSC_FAT_BASE_PATH,
@@ -345,6 +416,33 @@ static esp_err_t msc_storage_init_spiflash(void)
     ESP_RETURN_ON_ERROR(tinyusb_msc_set_storage_callback(storage_mount_changed_cb, NULL), TAG, "set_storage_callback failed");
 
     return ESP_OK;
+}
+
+static void apply_recording_mode(void)
+{
+    // Ensure files are closed before switching ownership.
+    if (s_log_mutex) {
+        if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            log_close_all();
+            xSemaphoreGive(s_log_mutex);
+        }
+    }
+
+    if (!s_msc_storage) {
+        return;
+    }
+
+    if (s_recording_enabled) {
+        // Hide disk from the host and mount to APP for logging
+        ESP_ERROR_CHECK(tinyusb_msc_set_storage_mount_point(s_msc_storage, TINYUSB_MSC_STORAGE_MOUNT_APP));
+        s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
+    } else {
+        // Expose disk to host and stop logging
+        ESP_ERROR_CHECK(tinyusb_msc_set_storage_mount_point(s_msc_storage, TINYUSB_MSC_STORAGE_MOUNT_USB));
+        s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB;
+    }
+
+    status_led_set_recording(s_recording_enabled);
 }
 
 // ----------------------------- Sensor / logger task -------------------------
@@ -487,6 +585,28 @@ void app_main(void)
 
     s_log_mutex = xSemaphoreCreateMutex();
 
+    // Init status LED (best-effort)
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = STATUS_LED_GPIO,
+        .max_leds = 1,
+        .led_pixel_format = LED_PIXEL_FORMAT_GRB,
+        .led_model = LED_MODEL_WS2812,
+        .flags.invert_out = false,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .mem_block_symbols = 64,
+        .flags.with_dma = false,
+    };
+    esp_err_t led_err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led);
+    if (led_err != ESP_OK) {
+        ESP_LOGW(TAG, "Status LED init failed (%s) on GPIO%d", esp_err_to_name(led_err), (int)STATUS_LED_GPIO);
+        s_led = NULL;
+    }
+
+    recording_toggle_on_boot();
+
     // I2C init (new driver, ESP-IDF v5.x)
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port = MAX30102_I2C_PORT,
@@ -543,8 +663,11 @@ void app_main(void)
     ESP_ERROR_CHECK(tinyusb_cdcacm_init(&acm_cfg));
     ESP_ERROR_CHECK(tinyusb_console_init(TINYUSB_CDC_ACM_0));
 
-    if (sensor_err == ESP_OK) {
-        xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, NULL);
+    // Apply mode after USB + storage are initialized.
+    apply_recording_mode();
+
+    if (s_recording_enabled && sensor_err == ESP_OK) {
+        xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, &s_sensor_task);
     }
 }
 

@@ -61,3 +61,16 @@ Notes:
   - Flashing uses the ROM download port (often shows as "USB JTAG/serial").
   - Monitoring uses the CDC COM port created by the application.
 - Logging pauses while the PC has the drive mounted. Use Windows **Eject** to resume logging.
+
+## Recording mode switch (RESET button)
+
+This firmware uses the **RESET** button as a simple on/off switch by toggling a persistent flag on every boot:
+
+- **Recording ON (LED green)**:
+  - Records and appends to `/data/log.csv`
+  - **Hides the MSC disk from the PC** (so `log.csv` does not appear and recording never pauses)
+- **Recording OFF (LED red)**:
+  - Stops recording
+  - **Exposes the MSC disk to the PC** so you can copy `log.csv`
+
+On ESP32-S3 DevKitC-1 the status LED is assumed to be the onboard WS2812 on **GPIO48**. If your board differs, change `STATUS_LED_GPIO` in `main/main.c`.
