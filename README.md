@@ -76,5 +76,10 @@ Status LED configuration is under:
 
 - `idf.py menuconfig` -> **MAX3010x Logger** -> **Status LED**
 
-If your LED is “embedded/on-board”, select a **Board LED preset** (defaults to **ESP32-S3 DevKitC-1 WS2812 on GPIO48**).
+If your LED is “embedded/on-board”, select a **Board LED preset**.
+For ESP32-S3 DevKitC-1, note the board revision:
+
+- **v1.0**: WS2812 on **GPIO48**
+- **v1.1**: WS2812 on **GPIO38**
+
 If your board isn’t listed, choose **Custom** and then select the LED type/pins.

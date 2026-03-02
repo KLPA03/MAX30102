@@ -56,7 +56,10 @@ menu "MAX3010x Logger"
                 know the GPIO. If your board isn't listed, choose Custom and set the LED wiring manually.
 
             config APP_STATUS_LED_PRESET_DEVKITC1
-                bool "ESP32-S3 DevKitC-1 onboard RGB (WS2812 on GPIO48)"
+                bool "ESP32-S3 DevKitC-1 v1.0 onboard RGB (WS2812 on GPIO48)"
+
+            config APP_STATUS_LED_PRESET_DEVKITC1_V1_1
+                bool "ESP32-S3 DevKitC-1 v1.1 onboard RGB (WS2812 on GPIO38)"
 
             config APP_STATUS_LED_PRESET_WS2812_GPIO33
                 bool "WS2812 onboard RGB (GPIO33) (e.g. Adafruit Feather ESP32-S3)"
