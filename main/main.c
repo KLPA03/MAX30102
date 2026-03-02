@@ -875,7 +875,11 @@ void app_main(void)
 #if CONFIG_APP_STATUS_LED_PRESET_DEVKITC1
     s_status_led_kind = STATUS_LED_KIND_WS2812;
     s_status_led_ws2812_gpio = GPIO_NUM_48;
-    ESP_LOGI(TAG, "Status LED preset: DevKitC-1 (WS2812 on GPIO48)");
+    ESP_LOGI(TAG, "Status LED preset: DevKitC-1 v1.0 (WS2812 on GPIO48)");
+#elif CONFIG_APP_STATUS_LED_PRESET_DEVKITC1_V1_1
+    s_status_led_kind = STATUS_LED_KIND_WS2812;
+    s_status_led_ws2812_gpio = GPIO_NUM_38;
+    ESP_LOGI(TAG, "Status LED preset: DevKitC-1 v1.1 (WS2812 on GPIO38)");
 #elif CONFIG_APP_STATUS_LED_PRESET_WS2812_GPIO33
     s_status_led_kind = STATUS_LED_KIND_WS2812;
     s_status_led_ws2812_gpio = GPIO_NUM_33;
