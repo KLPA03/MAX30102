@@ -108,7 +108,8 @@ static gpio_num_t s_status_led_red_gpio = GPIO_NUM_NC;
 static gpio_num_t s_status_led_green_gpio = GPIO_NUM_NC;
 static bool s_status_led_gpio_active_low = true;
 
-static led_strip_handle_t s_led = NULL;
+static led_strip_handle_t s_ws2812_leds[2] = { NULL, NULL };
+static int s_ws2812_led_count = 0;
 
 // ----------------------------- I2C helpers ---------------------------------
 
@@ -419,12 +420,16 @@ static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
     if (s_status_led_kind != STATUS_LED_KIND_WS2812) {
         return;
     }
-    if (!s_led) {
+    if (s_ws2812_led_count <= 0) {
         return;
     }
     // led_strip uses RGB order in API regardless of pixel format.
-    (void)led_strip_set_pixel(s_led, 0, r, g, b);
-    (void)led_strip_refresh(s_led);
+    for (int i = 0; i < s_ws2812_led_count; i++) {
+        if (s_ws2812_leds[i]) {
+            (void)led_strip_set_pixel(s_ws2812_leds[i], 0, r, g, b);
+            (void)led_strip_refresh(s_ws2812_leds[i]);
+        }
+    }
 #else
     (void)r;
     (void)g;
@@ -437,10 +442,10 @@ static void status_led_set_recording(bool recording_enabled)
     if (s_status_led_kind == STATUS_LED_KIND_WS2812) {
         if (recording_enabled) {
             // ON = green
-            status_led_set_rgb(0, 16, 0);
+            status_led_set_rgb(0, 64, 0);
         } else {
             // OFF = red
-            status_led_set_rgb(16, 0, 0);
+            status_led_set_rgb(64, 0, 0);
         }
         return;
     }
@@ -862,6 +867,37 @@ static int usb_cdc_vprintf(const char *fmt, va_list ap)
     return len;
 }
 
+static esp_err_t ws2812_try_init_on_gpio(gpio_num_t gpio)
+{
+    if (s_ws2812_led_count >= (int)(sizeof(s_ws2812_leds) / sizeof(s_ws2812_leds[0]))) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    led_strip_handle_t h = NULL;
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = gpio,
+        .max_leds = 1,
+        .led_model = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+        .flags.invert_out = false,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .mem_block_symbols = 64,
+        .flags.with_dma = false,
+    };
+    esp_err_t err = led_strip_new_rmt_device(&strip_config, &rmt_config, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WS2812 init failed (%s) on GPIO%d", esp_err_to_name(err), (int)gpio);
+        return err;
+    }
+
+    s_ws2812_leds[s_ws2812_led_count++] = h;
+    ESP_LOGI(TAG, "WS2812 status LED ready on GPIO%d", (int)gpio);
+    return ESP_OK;
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Booting");
@@ -912,24 +948,15 @@ void app_main(void)
 #endif
 
     if (s_status_led_kind == STATUS_LED_KIND_WS2812) {
-        led_strip_config_t strip_config = {
-            .strip_gpio_num = s_status_led_ws2812_gpio,
-            .max_leds = 1,
-            .led_model = LED_MODEL_WS2812,
-            .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
-            .flags.invert_out = false,
-        };
-        led_strip_rmt_config_t rmt_config = {
-            .clk_src = RMT_CLK_SRC_DEFAULT,
-            .resolution_hz = 10 * 1000 * 1000,
-            .mem_block_symbols = 64,
-            .flags.with_dma = false,
-        };
-        esp_err_t led_err = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led);
-        if (led_err != ESP_OK) {
-            ESP_LOGW(TAG, "WS2812 status LED init failed (%s) on GPIO%d",
-                     esp_err_to_name(led_err), (int)s_status_led_ws2812_gpio);
-            s_led = NULL;
+        // DevKitC-1 has two revisions with different RGB LED pins. To avoid confusion, try both.
+#if CONFIG_APP_STATUS_LED_PRESET_DEVKITC1 || CONFIG_APP_STATUS_LED_PRESET_DEVKITC1_V1_1
+        (void)ws2812_try_init_on_gpio(GPIO_NUM_48);
+        (void)ws2812_try_init_on_gpio(GPIO_NUM_38);
+#else
+        (void)ws2812_try_init_on_gpio(s_status_led_ws2812_gpio);
+#endif
+        if (s_ws2812_led_count <= 0) {
+            ESP_LOGW(TAG, "No WS2812 LED driver could be initialized; disabling status LED");
             s_status_led_kind = STATUS_LED_KIND_DISABLED;
         }
     } else if (s_status_led_kind == STATUS_LED_KIND_GPIO_DUAL) {
@@ -945,6 +972,15 @@ void app_main(void)
 
     // Show ON/OFF state immediately (not only after USB/MSC init).
     status_led_set_recording(s_recording_enabled);
+    // Quick self-test blink so it's obvious if the LED works.
+    if (s_status_led_kind == STATUS_LED_KIND_WS2812 || s_status_led_kind == STATUS_LED_KIND_GPIO_DUAL) {
+        vTaskDelay(pdMS_TO_TICKS(80));
+        status_led_set_rgb(64, 0, 0);
+        vTaskDelay(pdMS_TO_TICKS(80));
+        status_led_set_rgb(0, 64, 0);
+        vTaskDelay(pdMS_TO_TICKS(80));
+        status_led_set_recording(s_recording_enabled);
+    }
 
     ESP_LOGI(TAG, "I2C: SDA=GPIO%d SCL=GPIO%d freq=%dHz internal_pullups=%s",
              (int)MAX30102_I2C_SDA_GPIO, (int)MAX30102_I2C_SCL_GPIO, (int)I2C_FREQ_HZ,
