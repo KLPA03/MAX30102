@@ -876,6 +876,14 @@ void app_main(void)
     s_status_led_kind = STATUS_LED_KIND_WS2812;
     s_status_led_ws2812_gpio = GPIO_NUM_48;
     ESP_LOGI(TAG, "Status LED preset: DevKitC-1 (WS2812 on GPIO48)");
+#elif CONFIG_APP_STATUS_LED_PRESET_WS2812_GPIO33
+    s_status_led_kind = STATUS_LED_KIND_WS2812;
+    s_status_led_ws2812_gpio = GPIO_NUM_33;
+    ESP_LOGI(TAG, "Status LED preset: WS2812 on GPIO33");
+#elif CONFIG_APP_STATUS_LED_PRESET_WS2812_GPIO21
+    s_status_led_kind = STATUS_LED_KIND_WS2812;
+    s_status_led_ws2812_gpio = GPIO_NUM_21;
+    ESP_LOGI(TAG, "Status LED preset: WS2812 on GPIO21");
 #elif CONFIG_APP_STATUS_LED_PRESET_CUSTOM
     // Custom configuration below
 #if CONFIG_APP_STATUS_LED_WS2812
@@ -930,6 +938,9 @@ void app_main(void)
         };
         ESP_ERROR_CHECK(gpio_config(&out_cfg));
     }
+
+    // Show ON/OFF state immediately (not only after USB/MSC init).
+    status_led_set_recording(s_recording_enabled);
 
     ESP_LOGI(TAG, "I2C: SDA=GPIO%d SCL=GPIO%d freq=%dHz internal_pullups=%s",
              (int)MAX30102_I2C_SDA_GPIO, (int)MAX30102_I2C_SCL_GPIO, (int)I2C_FREQ_HZ,

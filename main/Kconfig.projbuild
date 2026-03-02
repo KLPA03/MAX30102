@@ -58,6 +58,12 @@ menu "MAX3010x Logger"
             config APP_STATUS_LED_PRESET_DEVKITC1
                 bool "ESP32-S3 DevKitC-1 onboard RGB (WS2812 on GPIO48)"
 
+            config APP_STATUS_LED_PRESET_WS2812_GPIO33
+                bool "WS2812 onboard RGB (GPIO33) (e.g. Adafruit Feather ESP32-S3)"
+
+            config APP_STATUS_LED_PRESET_WS2812_GPIO21
+                bool "WS2812 onboard RGB (GPIO21) (e.g. Seeed XIAO ESP32-S3 / ESP32-S3-Zero)"
+
             config APP_STATUS_LED_PRESET_CUSTOM
                 bool "Custom (set LED type/pins below)"
 
