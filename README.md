@@ -5,6 +5,7 @@ ESP-IDF v5.x project for ESP32-S3 that:
 - Reads **MAX3010x raw RED/IR** samples at **100 Hz** over I2C (MAX30102 PART_ID is typically `0x15`)
 - Downsamples to **20 Hz** (averages 5 samples)
 - Writes `log.csv` with header `time_ms,IR,RED`
+- Optionally logs converted photodiode current in picoamps (pA) for larger “real” numbers
 - Stores CSV on a **flash-backed FAT** partition used for **USB Mass Storage (MSC)** (`/data/log.csv`)
 - **Pauses file logging automatically** while the USB host (PC) owns the MSC storage, and **resumes** when the host safely ejects it
 
@@ -46,6 +47,11 @@ The project uses:
 ## Output (on the USB drive)
 
 - `log.csv`
+
+In `idf.py menuconfig` -> **MAX3010x Logger** -> **Logging**, you can choose:
+
+- **Raw counts** (18-bit, max 262143)
+- **pA** (converted photodiode current, typically 7 digits at higher signal levels)
 
 ## Using one USB cable (CDC + MSC)
 

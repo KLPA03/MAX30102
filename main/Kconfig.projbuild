@@ -123,6 +123,22 @@ menu "MAX3010x Logger"
                 Enable if the LED turns ON when the GPIO is driven LOW (common-anode LEDs).
     endmenu
 
+    menu "Logging"
+        choice APP_LOG_UNITS
+            prompt "IR/RED units"
+            default APP_LOG_UNITS_COUNTS
+            help
+                MAX3010x FIFO samples are 18-bit raw ADC counts (0..262143).
+                If you want 7-digit "real" values, you can log converted photodiode current in picoamps.
+
+            config APP_LOG_UNITS_COUNTS
+                bool "Raw counts (18-bit)"
+
+            config APP_LOG_UNITS_PICOAMPS
+                bool "Photodiode current (pA)"
+        endchoice
+    endmenu
+
     config APP_USB_CDC_CONSOLE
         bool "Send ESP_LOG output to USB CDC (native USB)"
         default y

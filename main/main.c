@@ -48,6 +48,12 @@
 #define RAW_SAMPLE_RATE_HZ     100
 #define DOWNSAMPLE_FACTOR      5
 
+// MAX3010x ADC is 18-bit; values are 0..262143. With SPO2_CONFIG ADC range=4096nA (0x2F),
+// we can convert raw counts to photodiode current:
+// current_pA = raw * (4096 nA * 1000 pA/nA) / 262143
+#define MAX3010X_ADC_COUNTS_MAX   262143U
+#define MAX3010X_ADC_RANGE_NA     4096U
+
 // ----------------------------- MAX30102 registers ---------------------------
 
 #define MAX30102_REG_INTR_STATUS_1   0x00
@@ -369,7 +375,12 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
         return ESP_FAIL;
     }
     (void)setvbuf(*fp, NULL, _IONBF, 0);
-    const char *hdr = "time_ms,IR,RED\n";
+    const char *hdr =
+#if CONFIG_APP_LOG_UNITS_PICOAMPS
+        "time_ms,IR_pA,RED_pA\n";
+#else
+        "time_ms,IR,RED\n";
+#endif
     if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
         fclose(*fp);
         *fp = NULL;
@@ -734,8 +745,17 @@ static void sensor_task(void *arg)
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
                     uint64_t t_ms = (uint64_t)(esp_timer_get_time() / 1000);
 
-                    ESP_LOGI(TAG, "time_ms=%"PRIu64" IR=%07"PRIu32" RED=%07"PRIu32"%s",
-                             t_ms, ir_ds, red_ds, logging_allowed() ? "" : " (paused)");
+                    uint32_t ir_out = ir_ds;
+                    uint32_t red_out = red_ds;
+#if CONFIG_APP_LOG_UNITS_PICOAMPS
+                    ir_out = (uint32_t)(((uint64_t)ir_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
+                    red_out = (uint32_t)(((uint64_t)red_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
+                    ESP_LOGI(TAG, "time_ms=%"PRIu64" IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
+                             t_ms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+#else
+                    ESP_LOGI(TAG, "time_ms=%"PRIu64" IR=%"PRIu32" RED=%"PRIu32"%s",
+                             t_ms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+#endif
 
                     if (logging_allowed() && s_log_mutex) {
                         if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
@@ -746,7 +766,7 @@ static void sensor_task(void *arg)
 
                             if (s_log_msc) {
                                 char line[64];
-                                int len = snprintf(line, sizeof(line), "%"PRIu64",%07"PRIu32",%07"PRIu32"\n", t_ms, ir_ds, red_ds);
+                                int len = snprintf(line, sizeof(line), "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_out, red_out);
                                 if (len > 0 && len < (int)sizeof(line)) {
                                     size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
                                     if (w != (size_t)len) {
