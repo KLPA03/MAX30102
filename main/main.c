@@ -734,7 +734,7 @@ static void sensor_task(void *arg)
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
                     uint64_t t_ms = (uint64_t)(esp_timer_get_time() / 1000);
 
-                    ESP_LOGI(TAG, "time_ms=%"PRIu64" IR=%"PRIu32" RED=%"PRIu32"%s",
+                    ESP_LOGI(TAG, "time_ms=%"PRIu64" IR=%07"PRIu32" RED=%07"PRIu32"%s",
                              t_ms, ir_ds, red_ds, logging_allowed() ? "" : " (paused)");
 
                     if (logging_allowed() && s_log_mutex) {
@@ -746,7 +746,7 @@ static void sensor_task(void *arg)
 
                             if (s_log_msc) {
                                 char line[64];
-                                int len = snprintf(line, sizeof(line), "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_ds, red_ds);
+                                int len = snprintf(line, sizeof(line), "%"PRIu64",%07"PRIu32",%07"PRIu32"\n", t_ms, ir_ds, red_ds);
                                 if (len > 0 && len < (int)sizeof(line)) {
                                     size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
                                     if (w != (size_t)len) {
