@@ -58,6 +58,10 @@ set the ADC range in:
 
 - `idf.py menuconfig` -> **MAX3010x Logger** -> **I2C (MAX3010x)** -> **MAX3010x ADC range**
 
+To increase the actual optical signal level, set the LED amplitudes in:
+
+- `idf.py menuconfig` -> **MAX3010x Logger** -> **MAX3010x Sensor** -> **RED/IR LED pulse amplitude**
+
 ## Using one USB cable (CDC + MSC)
 
 This firmware enumerates on the **DevKitC-1 USB (native/OTG) port** as:

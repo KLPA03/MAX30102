@@ -70,6 +70,24 @@ menu "MAX3010x Logger"
         endchoice
     endmenu
 
+    menu "MAX3010x Sensor"
+        config APP_MAX3010X_LED_RED_PA
+            int "RED LED pulse amplitude (0..255)"
+            range 0 255
+            default 36
+            help
+                Value written to LED1_PA (RED). Higher = more LED current, higher signal.
+                Start low and increase gradually to avoid saturation and heating.
+
+        config APP_MAX3010X_LED_IR_PA
+            int "IR LED pulse amplitude (0..255)"
+            range 0 255
+            default 36
+            help
+                Value written to LED2_PA (IR). Higher = more LED current, higher signal.
+                Start low and increase gradually to avoid saturation and heating.
+    endmenu
+
     menu "Status LED"
         choice APP_STATUS_LED_PRESET
             prompt "Board LED preset"
