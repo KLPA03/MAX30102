@@ -342,8 +342,8 @@ static esp_err_t max30102_init_100hz(void)
     ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_SPO2_CONFIG, spo2_cfg), TAG, "spo2 config");
 
     // LED pulse amplitudes (tune for your sensor / signal level)
-    ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_LED1_PA, 0x24), TAG, "led1");
-    ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_LED2_PA, 0x24), TAG, "led2");
+    ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_LED1_PA, (uint8_t)CONFIG_APP_MAX3010X_LED_RED_PA), TAG, "led1");
+    ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_LED2_PA, (uint8_t)CONFIG_APP_MAX3010X_LED_IR_PA), TAG, "led2");
 
     // Mode: SpO2 (RED + IR)
     ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_MODE_CONFIG, 0x03), TAG, "mode spo2");
