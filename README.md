@@ -53,6 +53,11 @@ In `idf.py menuconfig` -> **MAX3010x Logger** -> **Logging**, you can choose:
 - **Raw counts** (18-bit, max 262143)
 - **pA** (converted photodiode current, typically 7 digits at higher signal levels)
 
+To increase the maximum possible pA value (e.g. match Kaggle datasets showing ~7,000,000),
+set the ADC range in:
+
+- `idf.py menuconfig` -> **MAX3010x Logger** -> **I2C (MAX3010x)** -> **MAX3010x ADC range**
+
 ## Using one USB cable (CDC + MSC)
 
 This firmware enumerates on the **DevKitC-1 USB (native/OTG) port** as:
