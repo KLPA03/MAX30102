@@ -52,7 +52,23 @@
 // we can convert raw counts to photodiode current:
 // current_pA = raw * (4096 nA * 1000 pA/nA) / 262143
 #define MAX3010X_ADC_COUNTS_MAX   262143U
+
+#if CONFIG_APP_MAX3010X_ADC_RANGE_2048NA
+#define MAX3010X_ADC_RANGE_NA     2048U
+#define MAX3010X_SPO2_ADC_RANGE_BITS  0x00
+#elif CONFIG_APP_MAX3010X_ADC_RANGE_4096NA
 #define MAX3010X_ADC_RANGE_NA     4096U
+#define MAX3010X_SPO2_ADC_RANGE_BITS  0x20
+#elif CONFIG_APP_MAX3010X_ADC_RANGE_8192NA
+#define MAX3010X_ADC_RANGE_NA     8192U
+#define MAX3010X_SPO2_ADC_RANGE_BITS  0x40
+#elif CONFIG_APP_MAX3010X_ADC_RANGE_16384NA
+#define MAX3010X_ADC_RANGE_NA     16384U
+#define MAX3010X_SPO2_ADC_RANGE_BITS  0x60
+#else
+#define MAX3010X_ADC_RANGE_NA     4096U
+#define MAX3010X_SPO2_ADC_RANGE_BITS  0x20
+#endif
 
 // ----------------------------- MAX30102 registers ---------------------------
 
@@ -319,10 +335,11 @@ static esp_err_t max30102_init_100hz(void)
     ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_FIFO_CONFIG, 0x1F), TAG, "fifo config");
 
     // SPO2 config:
-    // - ADC range: 4096nA (01 << 5)
+    // - ADC range: configurable (menuconfig)
     // - Sample rate: 100Hz (011 << 2)
     // - Pulse width: 411us / 18-bit (11)
-    ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_SPO2_CONFIG, 0x2F), TAG, "spo2 config");
+    const uint8_t spo2_cfg = (uint8_t)(MAX3010X_SPO2_ADC_RANGE_BITS | 0x0C | 0x03);
+    ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_SPO2_CONFIG, spo2_cfg), TAG, "spo2 config");
 
     // LED pulse amplitudes (tune for your sensor / signal level)
     ESP_RETURN_ON_ERROR(i2c_reg_write_u8(s_max30102, MAX30102_REG_LED1_PA, 0x24), TAG, "led1");

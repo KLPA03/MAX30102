@@ -45,6 +45,29 @@ menu "MAX3010x Logger"
             help
                 ESP-IDF prints error logs for each failed I2C transaction. If enabled, those logs are muted
                 and the app will print its own rate-limited warnings instead.
+
+        choice APP_MAX3010X_ADC_RANGE
+            prompt "MAX3010x ADC range"
+            default APP_MAX3010X_ADC_RANGE_8192NA
+            help
+                ADC full-scale range. This impacts the conversion to picoamps (pA) and the maximum
+                representable pA value:
+                - 4096 nA -> 4,096,000 pA max
+                - 8192 nA -> 8,192,000 pA max (enough for Kaggle-style ~7 million values)
+                Higher range reduces resolution (bigger LSB).
+
+            config APP_MAX3010X_ADC_RANGE_2048NA
+                bool "2048 nA (2,048,000 pA max)"
+
+            config APP_MAX3010X_ADC_RANGE_4096NA
+                bool "4096 nA (4,096,000 pA max)"
+
+            config APP_MAX3010X_ADC_RANGE_8192NA
+                bool "8192 nA (8,192,000 pA max)"
+
+            config APP_MAX3010X_ADC_RANGE_16384NA
+                bool "16384 nA (16,384,000 pA max)"
+        endchoice
     endmenu
 
     menu "Status LED"
