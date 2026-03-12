@@ -204,6 +204,29 @@ menu "MAX3010x Logger"
             help
                 Prevents unexpected resets (brownout/watchdog) from flipping recording ON/OFF.
                 With this enabled, the state only toggles when reset reason is ESP_RST_EXT.
+
+        config APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
+            bool "Allow BOOT button to toggle recording (no reset)"
+            default y
+            help
+                On ESP32-S3 DevKitC-1, BOOT is GPIO0 (active-low). If enabled, a long press toggles
+                recording ON/OFF at runtime, updates the LED, and hides/exposes the USB drive.
+
+        config APP_BOOT_BUTTON_GPIO
+            int "BOOT button GPIO"
+            range 0 48
+            default 0
+            depends on APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
+            help
+                GPIO connected to BOOT button (active-low).
+
+        config APP_BOOT_BUTTON_HOLD_MS
+            int "BOOT long-press time (ms)"
+            range 100 3000
+            default 800
+            depends on APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
+            help
+                How long BOOT must be held to toggle recording.
     endmenu
 
     config APP_USB_CDC_CONSOLE
