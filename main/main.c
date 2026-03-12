@@ -766,8 +766,9 @@ static void sensor_task(void *arg)
                     uint32_t s_part = total_s % 60U;
                     uint32_t m_part = (total_s / 60U) % 60U;
                     uint32_t h_part = (total_s / 3600U);
-                    char t_hms[16];
-                    (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
+                    // Hours can exceed 2 digits, so use a larger buffer and don't force 2-digit hours.
+                    char t_hms[24];
+                    (void)snprintf(t_hms, sizeof(t_hms), "%"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
                                    h_part, m_part, s_part, ms_part);
 
                     uint32_t ir_out = ir_ds;
@@ -790,7 +791,7 @@ static void sensor_task(void *arg)
                             }
 
                             if (s_log_msc) {
-                                char line[64];
+                                char line[80];
                                 int len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, ir_out, red_out);
                                 if (len > 0 && len < (int)sizeof(line)) {
                                     size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
