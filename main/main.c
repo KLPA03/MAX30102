@@ -455,6 +455,7 @@ static void log_close_all(void)
 }
 
 static bool logging_allowed(void);
+static void apply_recording_mode(void);
 
 static void logger_task(void *arg)
 {
