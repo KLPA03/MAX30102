@@ -113,6 +113,7 @@ static int s_log_lines_since_reopen = 0;
 
 typedef struct {
     uint64_t t_ms;
+    uint64_t idx_20hz;
     uint32_t ir;
     uint32_t red;
 } log_sample_t;
@@ -403,9 +404,9 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
     (void)setvbuf(*fp, NULL, _IONBF, 0);
     const char *hdr =
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
-        "time_hms,IR_pA,RED_pA\n";
+        "t_ms,time_hms,idx_20hz,IR_pA,RED_pA\n";
 #else
-        "time_hms,IR,RED\n";
+        "t_ms,time_hms,idx_20hz,IR,RED\n";
 #endif
     if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
         fclose(*fp);
@@ -490,11 +491,13 @@ static void logger_task(void *arg)
 
             // Hours can grow beyond 2 digits; keep buffer generous to avoid -Wformat-truncation.
             char t_hms[32];
-            (void)snprintf(t_hms, sizeof(t_hms), "%"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
+            // Prefix with 'T' so Excel won't auto-round/auto-format it as a time value.
+            (void)snprintf(t_hms, sizeof(t_hms), "T%"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
                            h_part, m_part, s_part, ms_part);
 
-            char line[80];
-            int len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, s.ir, s.red);
+            char line[128];
+            int len = snprintf(line, sizeof(line), "%"PRIu64",%s,%"PRIu64",%"PRIu32",%"PRIu32"\n",
+                               s.t_ms, t_hms, s.idx_20hz, s.ir, s.red);
             if (len > 0 && len < (int)sizeof(line)) {
                 size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
                 if (w != (size_t)len) {
@@ -734,8 +737,8 @@ static void sensor_task(void *arg)
     int invalid_state_count_in_window = 0;
     bool timebase_set = false;
     uint64_t t0_ms = 0;
-    uint64_t raw_sample_idx = 0;
-    const uint32_t raw_period_ms = (uint32_t)(1000 / RAW_SAMPLE_RATE_HZ); // 10ms at 100Hz
+    uint64_t ds_idx = 0;
+    const uint32_t ds_period_ms = (uint32_t)((1000 / RAW_SAMPLE_RATE_HZ) * DOWNSAMPLE_FACTOR); // 50ms at 100->20Hz
 
     const int max_samples_per_bulk = 10;
     uint8_t fifo_bulk[6 * 10];
@@ -845,20 +848,19 @@ static void sensor_task(void *arg)
                 if (!timebase_set) {
                     // Anchor sample clock to first sample read; then advance by the configured sample rate.
                     t0_ms = (uint64_t)(esp_timer_get_time() / 1000);
-                    raw_sample_idx = 0;
+                    ds_idx = 0;
                     timebase_set = true;
                 }
 
                 acc_ir += raw_ir;
                 acc_red += raw_red;
                 acc_n++;
-                raw_sample_idx++;
 
                 if (acc_n >= DOWNSAMPLE_FACTOR) {
                     uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
                     // Use sample-clock derived timestamp so downsampled rows are exactly 20Hz (50ms steps).
-                    uint64_t sample_t_ms = t0_ms + ((raw_sample_idx - 1) * (uint64_t)raw_period_ms);
+                    uint64_t sample_t_ms = t0_ms + (ds_idx * (uint64_t)ds_period_ms);
 
                     uint32_t ir_out = ir_ds;
                     uint32_t red_out = red_ds;
@@ -875,12 +877,19 @@ static void sensor_task(void *arg)
                     if (s_sample_queue && logging_allowed()) {
                         log_sample_t out = {
                             .t_ms = sample_t_ms,
+                            .idx_20hz = ds_idx,
                             .ir = ir_out,
                             .red = red_out,
                         };
-                        (void)xQueueSend(s_sample_queue, &out, 0);
+                        if (xQueueSend(s_sample_queue, &out, 0) != pdTRUE) {
+                            // Queue full: drop oldest and retry once so logging doesn't "stop".
+                            log_sample_t dropped;
+                            (void)xQueueReceive(s_sample_queue, &dropped, 0);
+                            (void)xQueueSend(s_sample_queue, &out, 0);
+                        }
                     }
 
+                    ds_idx++;
                     acc_ir = 0;
                     acc_red = 0;
                     acc_n = 0;
