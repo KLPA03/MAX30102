@@ -542,6 +542,75 @@ static bool logging_allowed(void)
            (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP);
 }
 
+static void recording_persist_state(bool enabled)
+{
+    nvs_handle_t h;
+    if (nvs_open("app", NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    (void)nvs_set_u8(h, "rec", enabled ? 1 : 0);
+    (void)nvs_commit(h);
+    nvs_close(h);
+}
+
+static void recording_set(bool enabled)
+{
+    s_recording_enabled = enabled;
+    recording_persist_state(enabled);
+    apply_recording_mode();
+    ESP_LOGI(TAG, "Recording mode: %s (set via BOOT button)",
+             s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
+}
+
+static void boot_button_task(void *arg)
+{
+    (void)arg;
+#if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
+    const gpio_num_t btn = (gpio_num_t)CONFIG_APP_BOOT_BUTTON_GPIO;
+    const int hold_ms = CONFIG_APP_BOOT_BUTTON_HOLD_MS;
+
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << (int)btn),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    (void)gpio_config(&cfg);
+
+    bool was_pressed = false;
+    int64_t pressed_us = 0;
+    bool toggled_this_press = false;
+
+    while (true) {
+        bool pressed = (gpio_get_level(btn) == 0);
+        int64_t now_us = esp_timer_get_time();
+
+        if (pressed && !was_pressed) {
+            pressed_us = now_us;
+            toggled_this_press = false;
+        }
+
+        if (pressed && !toggled_this_press) {
+            int64_t dur_ms = (now_us - pressed_us) / 1000;
+            if (dur_ms >= hold_ms) {
+                ESP_LOGI(TAG, "BOOT long-press: toggling recording");
+                recording_set(!s_recording_enabled);
+                toggled_this_press = true;
+            }
+        }
+
+        if (!pressed) {
+            toggled_this_press = false;
+        }
+        was_pressed = pressed;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+#else
+    vTaskDelete(NULL);
+#endif
+}
+
 static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
 #if CONFIG_APP_STATUS_LED_PRESET_DEVKITC1 || CONFIG_APP_STATUS_LED_PRESET_CUSTOM
@@ -808,6 +877,11 @@ static void sensor_task(void *arg)
     uint8_t fifo_bulk[6 * 10];
 
     while (true) {
+        if (!s_recording_enabled) {
+            // Stop sampling activity when recording is OFF (drive exposed).
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         if (invalid_state_backoff_until_ms && (now_ms < invalid_state_backoff_until_ms)) {
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -1238,14 +1312,17 @@ void app_main(void)
     // Apply mode after USB + storage are initialized.
     apply_recording_mode();
 
-    if (s_recording_enabled) {
-        s_sample_queue = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(log_sample_t));
-        if (!s_sample_queue) {
-            ESP_LOGE(TAG, "Failed to create sample queue");
-        } else {
-            xTaskCreate(logger_task, "logger", 4096, NULL, 5, NULL);
-            xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, &s_sensor_task);
-        }
+    // Start tasks regardless of initial mode. Logging is gated by `logging_allowed()`.
+    // This ensures that switching mode later (via BOOT long-press or RESET) immediately works.
+    s_sample_queue = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(log_sample_t));
+    if (!s_sample_queue) {
+        ESP_LOGE(TAG, "Failed to create sample queue");
+    } else {
+        xTaskCreate(logger_task, "logger", 4096, NULL, 5, NULL);
+        xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, &s_sensor_task);
     }
+
+    // Optional runtime toggle using BOOT long-press (no reset).
+    xTaskCreate(boot_button_task, "boot_btn", 2048, NULL, 4, NULL);
 }
 
