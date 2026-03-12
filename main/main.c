@@ -12,6 +12,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
 #include "nvs.h"
@@ -404,9 +405,17 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
     (void)setvbuf(*fp, NULL, _IONBF, 0);
     const char *hdr =
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
+    #if CONFIG_APP_CSV_COMPACT
+        "time_hms,IR_pA,RED_pA\n";
+    #else
         "t_ms,time_hms,idx_20hz,IR_pA,RED_pA\n";
+    #endif
 #else
+    #if CONFIG_APP_CSV_COMPACT
+        "time_hms,IR,RED\n";
+    #else
         "t_ms,time_hms,idx_20hz,IR,RED\n";
+    #endif
 #endif
     if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
         fclose(*fp);
@@ -484,20 +493,23 @@ static void logger_task(void *arg)
 
         if (s_log_msc) {
             uint32_t total_s = (uint32_t)(s.t_ms / 1000ULL);
-            uint32_t ms_part = (uint32_t)(s.t_ms % 1000ULL);
             uint32_t s_part = total_s % 60U;
             uint32_t m_part = (total_s / 60U) % 60U;
             uint32_t h_part = (total_s / 3600U);
 
             // Hours can grow beyond 2 digits; keep buffer generous to avoid -Wformat-truncation.
             char t_hms[32];
-            // Prefix with 'T' so Excel won't auto-round/auto-format it as a time value.
-            (void)snprintf(t_hms, sizeof(t_hms), "T%"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
-                           h_part, m_part, s_part, ms_part);
+            (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32,
+                           h_part, m_part, s_part);
 
             char line[128];
-            int len = snprintf(line, sizeof(line), "%"PRIu64",%s,%"PRIu64",%"PRIu32",%"PRIu32"\n",
-                               s.t_ms, t_hms, s.idx_20hz, s.ir, s.red);
+            int len;
+#if CONFIG_APP_CSV_COMPACT
+            len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, s.ir, s.red);
+#else
+            len = snprintf(line, sizeof(line), "%"PRIu64",%s,%"PRIu64",%"PRIu32",%"PRIu32"\n",
+                           s.t_ms, t_hms, s.idx_20hz, s.ir, s.red);
+#endif
             if (len > 0 && len < (int)sizeof(line)) {
                 size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
                 if (w != (size_t)len) {
@@ -582,9 +594,27 @@ static void status_led_set_recording(bool recording_enabled)
     (void)recording_enabled;
 }
 
+static const char *reset_reason_str(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_UNKNOWN: return "UNKNOWN";
+    case ESP_RST_POWERON: return "POWERON";
+    case ESP_RST_EXT: return "EXT";
+    case ESP_RST_SW: return "SW";
+    case ESP_RST_PANIC: return "PANIC";
+    case ESP_RST_INT_WDT: return "INT_WDT";
+    case ESP_RST_TASK_WDT: return "TASK_WDT";
+    case ESP_RST_WDT: return "WDT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_SDIO: return "SDIO";
+    default: return "OTHER";
+    }
+}
+
 static void recording_toggle_on_boot(void)
 {
-    // Toggle persistent state on every boot (RESET acts like an on/off switch).
+    // Persist state in NVS and (optionally) only toggle on external reset button.
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -599,18 +629,35 @@ static void recording_toggle_on_boot(void)
     uint8_t v = 0;
     err = nvs_get_u8(h, "rec", &v);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        v = 0; // so first boot toggles to ON
+        v = CONFIG_APP_RECORDING_DEFAULT_ON ? 1 : 0;
+        ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
+        ESP_ERROR_CHECK(nvs_commit(h));
     } else {
         ESP_ERROR_CHECK(err);
     }
 
-    v = (uint8_t)(!v);
-    ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
-    ESP_ERROR_CHECK(nvs_commit(h));
+    esp_reset_reason_t reason = esp_reset_reason();
+    bool do_toggle = true;
+#if CONFIG_APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
+    do_toggle = (reason == ESP_RST_EXT);
+#endif
+    if (do_toggle) {
+        v = (uint8_t)(!v);
+        ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
+        ESP_ERROR_CHECK(nvs_commit(h));
+    }
     nvs_close(h);
 
     s_recording_enabled = (v != 0);
-    ESP_LOGI(TAG, "Recording mode: %s (toggled by RESET)", s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
+    ESP_LOGI(TAG, "Reset reason: %s", reset_reason_str(reason));
+    ESP_LOGI(TAG, "Recording mode: %s%s",
+             s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)",
+#if CONFIG_APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
+             " (toggles only on RESET button)"
+#else
+             " (toggles on every boot)"
+#endif
+    );
 }
 
 static void storage_mount_changed_cb(tinyusb_msc_storage_handle_t handle, tinyusb_msc_event_t *event, void *arg)
@@ -736,7 +783,6 @@ static void sensor_task(void *arg)
     uint32_t invalid_state_count_window_start_ms = 0;
     int invalid_state_count_in_window = 0;
     bool timebase_set = false;
-    uint64_t t0_ms = 0;
     uint64_t ds_idx = 0;
     const uint32_t ds_period_ms = (uint32_t)((1000 / RAW_SAMPLE_RATE_HZ) * DOWNSAMPLE_FACTOR); // 50ms at 100->20Hz
 
@@ -847,7 +893,6 @@ static void sensor_task(void *arg)
 
                 if (!timebase_set) {
                     // Anchor sample clock to first sample read; then advance by the configured sample rate.
-                    t0_ms = (uint64_t)(esp_timer_get_time() / 1000);
                     ds_idx = 0;
                     timebase_set = true;
                 }
@@ -860,7 +905,7 @@ static void sensor_task(void *arg)
                     uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
                     // Use sample-clock derived timestamp so downsampled rows are exactly 20Hz (50ms steps).
-                    uint64_t sample_t_ms = t0_ms + (ds_idx * (uint64_t)ds_period_ms);
+                    uint64_t sample_t_ms = (ds_idx * (uint64_t)ds_period_ms);
 
                     uint32_t ir_out = ir_ds;
                     uint32_t red_out = red_ds;

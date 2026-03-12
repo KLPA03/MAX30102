@@ -178,6 +178,32 @@ menu "MAX3010x Logger"
             config APP_LOG_UNITS_PICOAMPS
                 bool "Photodiode current (pA)"
         endchoice
+
+        config APP_CSV_COMPACT
+            bool "Write compact CSV (time_hms,IR,RED only)"
+            default y
+            help
+                If enabled, CSV contains only:
+                - time_hms (HH:MM:SS)
+                - IR (or IR_pA)
+                - RED (or RED_pA)
+                Note: at 20 Hz you will see repeated timestamps within the same second.
+    endmenu
+
+    menu "Recording mode"
+        config APP_RECORDING_DEFAULT_ON
+            bool "Default recording state on first boot"
+            default n
+            help
+                If NVS has no saved recording state yet (fresh flash), this selects the initial state.
+                OFF exposes the drive to the PC; ON hides the drive and starts logging.
+
+        config APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
+            bool "Toggle recording only on external RESET button"
+            default y
+            help
+                Prevents unexpected resets (brownout/watchdog) from flipping recording ON/OFF.
+                With this enabled, the state only toggles when reset reason is ESP_RST_EXT.
     endmenu
 
     config APP_USB_CDC_CONSOLE
