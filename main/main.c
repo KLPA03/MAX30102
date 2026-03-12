@@ -629,7 +629,11 @@ static void recording_toggle_on_boot(void)
     uint8_t v = 0;
     err = nvs_get_u8(h, "rec", &v);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        v = CONFIG_APP_RECORDING_DEFAULT_ON ? 1 : 0;
+#if CONFIG_APP_RECORDING_DEFAULT_ON
+        v = 1;
+#else
+        v = 0;
+#endif
         ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
         ESP_ERROR_CHECK(nvs_commit(h));
     } else {
