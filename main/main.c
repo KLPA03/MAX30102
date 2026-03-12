@@ -111,6 +111,15 @@ static int s_log_lines_since_reopen = 0;
 // Trade-off: more directory updates, but much less chance of garbage tail bytes.
 #define LOG_REOPEN_EVERY_N_LINES  20
 
+typedef struct {
+    uint64_t t_ms;
+    uint32_t ir;
+    uint32_t red;
+} log_sample_t;
+
+#define SAMPLE_QUEUE_LEN  256
+static QueueHandle_t s_sample_queue = NULL;
+
 // Recording mode toggled by RESET button:
 // - recording ON  -> GREEN LED, MSC drive hidden (no log.csv on PC), data appended to /data/log.csv
 // - recording OFF -> RED LED, MSC drive exposed to PC, no recording
@@ -435,6 +444,79 @@ static void log_close_all(void)
     s_log_lines_since_reopen = 0;
 }
 
+static void logger_task(void *arg)
+{
+    (void)arg;
+    log_sample_t s;
+    int lines_since_sync = 0;
+
+    while (true) {
+        if (!logging_allowed()) {
+            // Drop queued samples while not allowed to log.
+            if (s_sample_queue) {
+                (void)xQueueReceive(s_sample_queue, &s, pdMS_TO_TICKS(50));
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            continue;
+        }
+
+        if (!s_sample_queue) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        if (xQueueReceive(s_sample_queue, &s, pdMS_TO_TICKS(200)) != pdTRUE) {
+            continue;
+        }
+
+        if (!s_log_mutex || xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+            continue;
+        }
+
+        // MSC/FAT log (only when storage is mounted to APP)
+        if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
+            ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
+        }
+
+        if (s_log_msc) {
+            uint32_t total_s = (uint32_t)(s.t_ms / 1000ULL);
+            uint32_t ms_part = (uint32_t)(s.t_ms % 1000ULL);
+            uint32_t s_part = total_s % 60U;
+            uint32_t m_part = (total_s / 60U) % 60U;
+            uint32_t h_part = (total_s / 3600U);
+
+            char t_hms[24];
+            (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
+                           h_part, m_part, s_part, ms_part);
+
+            char line[80];
+            int len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, s.ir, s.red);
+            if (len > 0 && len < (int)sizeof(line)) {
+                size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
+                if (w != (size_t)len) {
+                    ESP_LOGW(TAG, "MSC log write failed (errno=%d)", errno);
+                } else {
+                    s_log_lines_since_reopen++;
+                    lines_since_sync++;
+                    log_reopen_if_needed();
+                }
+            } else {
+                ESP_LOGW(TAG, "MSC log line format overflow");
+            }
+
+            // Periodic sync (fsync is slow; doing it every line reduces effective sample rate).
+            if (lines_since_sync >= 20) {
+                fflush(s_log_msc);
+                (void)fsync(fileno(s_log_msc));
+                lines_since_sync = 0;
+            }
+        }
+
+        xSemaphoreGive(s_log_mutex);
+    }
+}
+
 static bool logging_allowed(void)
 {
     return s_recording_enabled &&
@@ -647,6 +729,10 @@ static void sensor_task(void *arg)
     uint32_t invalid_state_backoff_until_ms = 0;
     uint32_t invalid_state_count_window_start_ms = 0;
     int invalid_state_count_in_window = 0;
+    bool timebase_set = false;
+    uint64_t t0_ms = 0;
+    uint64_t raw_sample_idx = 0;
+    const uint32_t raw_period_ms = (uint32_t)(1000 / RAW_SAMPLE_RATE_HZ); // 10ms at 100Hz
 
     const int max_samples_per_bulk = 10;
     uint8_t fifo_bulk[6 * 10];
@@ -753,61 +839,43 @@ static void sensor_task(void *arg)
                 raw_red &= 0x3FFFF;
                 raw_ir &= 0x3FFFF;
 
+                if (!timebase_set) {
+                    // Anchor sample clock to first sample read; then advance by the configured sample rate.
+                    t0_ms = (uint64_t)(esp_timer_get_time() / 1000);
+                    raw_sample_idx = 0;
+                    timebase_set = true;
+                }
+
                 acc_ir += raw_ir;
                 acc_red += raw_red;
                 acc_n++;
+                raw_sample_idx++;
 
                 if (acc_n >= DOWNSAMPLE_FACTOR) {
                     uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
-                    uint64_t t_ms = (uint64_t)(esp_timer_get_time() / 1000);
-                    uint32_t total_s = (uint32_t)(t_ms / 1000ULL);
-                    uint32_t ms_part = (uint32_t)(t_ms % 1000ULL);
-                    uint32_t s_part = total_s % 60U;
-                    uint32_t m_part = (total_s / 60U) % 60U;
-                    uint32_t h_part = (total_s / 3600U);
-                    // Hours can exceed 2 digits, so use a larger buffer and don't force 2-digit hours.
-                    char t_hms[24];
-                    (void)snprintf(t_hms, sizeof(t_hms), "%"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
-                                   h_part, m_part, s_part, ms_part);
+                    // Use sample-clock derived timestamp so downsampled rows are exactly 20Hz (50ms steps).
+                    uint64_t sample_t_ms = t0_ms + ((raw_sample_idx - 1) * (uint64_t)raw_period_ms);
 
                     uint32_t ir_out = ir_ds;
                     uint32_t red_out = red_ds;
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
                     ir_out = (uint32_t)(((uint64_t)ir_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
                     red_out = (uint32_t)(((uint64_t)red_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
-                    ESP_LOGI(TAG, "time=%s IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
-                             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+                    ESP_LOGI(TAG, "t_ms=%"PRIu64" IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
+                             sample_t_ms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
 #else
-                    ESP_LOGI(TAG, "time=%s IR=%"PRIu32" RED=%"PRIu32"%s",
-                             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+                    ESP_LOGI(TAG, "t_ms=%"PRIu64" IR=%"PRIu32" RED=%"PRIu32"%s",
+                             sample_t_ms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
 #endif
 
-                    if (logging_allowed() && s_log_mutex) {
-                        if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                            // MSC/FAT log (only when storage is mounted to APP)
-                            if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
-                                ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
-                            }
-
-                            if (s_log_msc) {
-                                char line[80];
-                                int len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, ir_out, red_out);
-                                if (len > 0 && len < (int)sizeof(line)) {
-                                    size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
-                                    if (w != (size_t)len) {
-                                        ESP_LOGW(TAG, "MSC log write failed (errno=%d)", errno);
-                                    }
-                                } else {
-                                    ESP_LOGW(TAG, "MSC log line format overflow");
-                                }
-                                fflush(s_log_msc);
-                                (void)fsync(fileno(s_log_msc));
-                                s_log_lines_since_reopen++;
-                                log_reopen_if_needed();
-                            }
-                            xSemaphoreGive(s_log_mutex);
-                        }
+                    if (s_sample_queue && logging_allowed()) {
+                        log_sample_t out = {
+                            .t_ms = sample_t_ms,
+                            .ir = ir_out,
+                            .red = red_out,
+                        };
+                        (void)xQueueSend(s_sample_queue, &out, 0);
                     }
 
                     acc_ir = 0;
@@ -820,7 +888,7 @@ static void sensor_task(void *arg)
         }
 
         // Let FIFO accumulate a bit; avoids hammering I2C.
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -1093,7 +1161,13 @@ void app_main(void)
     apply_recording_mode();
 
     if (s_recording_enabled && sensor_err == ESP_OK) {
-        xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, &s_sensor_task);
+        s_sample_queue = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(log_sample_t));
+        if (!s_sample_queue) {
+            ESP_LOGE(TAG, "Failed to create sample queue");
+        } else {
+            xTaskCreate(logger_task, "logger", 4096, NULL, 5, NULL);
+            xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, &s_sensor_task);
+        }
     }
 }
 
