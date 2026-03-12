@@ -1035,10 +1035,21 @@ static int usb_cdc_vprintf(const char *fmt, va_list ap)
         return vprintf(fmt, ap);
     }
 
+    // Always mirror logs to ROM printf (USB-Serial/JTAG/UART) so you can still monitor even
+    // when the CDC COM port disappears/re-enumerates on Windows.
+    if (len > 0) {
+        size_t n_rom = (size_t)len;
+        if (n_rom >= sizeof(buf)) {
+            n_rom = sizeof(buf) - 1;
+        }
+        buf[n_rom] = '\0';
+        esp_rom_printf("%s", buf);
+    }
+
     // If USB isn't ready yet, fall back to default stdout (usually UART).
     // Note: Some hosts/tools may not assert "connected" line state immediately; writing is still safe.
     if (!tud_ready()) {
-        return vprintf(fmt, ap);
+        return len;
     }
 
     if (len <= 0) {
