@@ -444,6 +444,8 @@ static void log_close_all(void)
     s_log_lines_since_reopen = 0;
 }
 
+static bool logging_allowed(void);
+
 static void logger_task(void *arg)
 {
     (void)arg;
