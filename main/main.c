@@ -772,13 +772,12 @@ static void apply_recording_mode(void)
             xSemaphoreGive(s_log_mutex);
         }
     } else {
-        // Before exposing, ensure file exists and is closed cleanly.
-        if (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) {
-            if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                (void)ensure_csv_header(&s_log_msc, MSC_LOG_PATH);
-                log_close_all();
-                xSemaphoreGive(s_log_mutex);
-            }
+        // Before exposing, best-effort ensure file exists and is closed cleanly.
+        // (Even if our cached mount point is stale, ensure_csv_header() will just fail gracefully.)
+        if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            (void)ensure_csv_header(&s_log_msc, MSC_LOG_PATH);
+            log_close_all();
+            xSemaphoreGive(s_log_mutex);
         }
         // Expose disk to host and stop logging
         ESP_ERROR_CHECK(tinyusb_msc_set_storage_mount_point(s_msc_storage, TINYUSB_MSC_STORAGE_MOUNT_USB));
@@ -1228,7 +1227,7 @@ void app_main(void)
     // Apply mode after USB + storage are initialized.
     apply_recording_mode();
 
-    if (s_recording_enabled && sensor_err == ESP_OK) {
+    if (s_recording_enabled) {
         s_sample_queue = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(log_sample_t));
         if (!s_sample_queue) {
             ESP_LOGE(TAG, "Failed to create sample queue");
