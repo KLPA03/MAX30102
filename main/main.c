@@ -764,7 +764,22 @@ static void apply_recording_mode(void)
         // Hide disk from the host and mount to APP for logging
         ESP_ERROR_CHECK(tinyusb_msc_set_storage_mount_point(s_msc_storage, TINYUSB_MSC_STORAGE_MOUNT_APP));
         s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
+
+        // Ensure the CSV exists early so it will be present when later exposed to the PC.
+        if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            (void)ensure_csv_header(&s_log_msc, MSC_LOG_PATH);
+            log_close_all();
+            xSemaphoreGive(s_log_mutex);
+        }
     } else {
+        // Before exposing, ensure file exists and is closed cleanly.
+        if (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) {
+            if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                (void)ensure_csv_header(&s_log_msc, MSC_LOG_PATH);
+                log_close_all();
+                xSemaphoreGive(s_log_mutex);
+            }
+        }
         // Expose disk to host and stop logging
         ESP_ERROR_CHECK(tinyusb_msc_set_storage_mount_point(s_msc_storage, TINYUSB_MSC_STORAGE_MOUNT_USB));
         s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB;
@@ -1147,15 +1162,7 @@ void app_main(void)
 
     // Show ON/OFF state immediately (not only after USB/MSC init).
     status_led_set_recording(s_recording_enabled);
-    // Quick self-test blink so it's obvious if the LED works.
-    if (s_status_led_kind == STATUS_LED_KIND_WS2812 || s_status_led_kind == STATUS_LED_KIND_GPIO_DUAL) {
-        vTaskDelay(pdMS_TO_TICKS(80));
-        status_led_set_rgb(64, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(80));
-        status_led_set_rgb(0, 64, 0);
-        vTaskDelay(pdMS_TO_TICKS(80));
-        status_led_set_recording(s_recording_enabled);
-    }
+    // (Self-test blink removed to avoid confusion with ON/OFF toggle)
 
     ESP_LOGI(TAG, "I2C: SDA=GPIO%d SCL=GPIO%d freq=%dHz internal_pullups=%s",
              (int)MAX30102_I2C_SDA_GPIO, (int)MAX30102_I2C_SCL_GPIO, (int)I2C_FREQ_HZ,
