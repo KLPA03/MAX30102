@@ -394,9 +394,9 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
     (void)setvbuf(*fp, NULL, _IONBF, 0);
     const char *hdr =
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
-        "time_ms,IR_pA,RED_pA\n";
+        "time_hms,IR_pA,RED_pA\n";
 #else
-        "time_ms,IR,RED\n";
+        "time_hms,IR,RED\n";
 #endif
     if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
         fclose(*fp);
@@ -761,17 +761,25 @@ static void sensor_task(void *arg)
                     uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
                     uint64_t t_ms = (uint64_t)(esp_timer_get_time() / 1000);
+                    uint32_t total_s = (uint32_t)(t_ms / 1000ULL);
+                    uint32_t ms_part = (uint32_t)(t_ms % 1000ULL);
+                    uint32_t s_part = total_s % 60U;
+                    uint32_t m_part = (total_s / 60U) % 60U;
+                    uint32_t h_part = (total_s / 3600U);
+                    char t_hms[16];
+                    (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
+                                   h_part, m_part, s_part, ms_part);
 
                     uint32_t ir_out = ir_ds;
                     uint32_t red_out = red_ds;
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
                     ir_out = (uint32_t)(((uint64_t)ir_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
                     red_out = (uint32_t)(((uint64_t)red_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
-                    ESP_LOGI(TAG, "time_ms=%"PRIu64" IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
-                             t_ms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+                    ESP_LOGI(TAG, "time=%s IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
+                             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
 #else
-                    ESP_LOGI(TAG, "time_ms=%"PRIu64" IR=%"PRIu32" RED=%"PRIu32"%s",
-                             t_ms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+                    ESP_LOGI(TAG, "time=%s IR=%"PRIu32" RED=%"PRIu32"%s",
+                             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
 #endif
 
                     if (logging_allowed() && s_log_mutex) {
@@ -783,7 +791,7 @@ static void sensor_task(void *arg)
 
                             if (s_log_msc) {
                                 char line[64];
-                                int len = snprintf(line, sizeof(line), "%"PRIu64",%"PRIu32",%"PRIu32"\n", t_ms, ir_out, red_out);
+                                int len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, ir_out, red_out);
                                 if (len > 0 && len < (int)sizeof(line)) {
                                     size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
                                     if (w != (size_t)len) {
