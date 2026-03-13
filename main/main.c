@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <string.h>
-#include <ctype.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <unistd.h>
@@ -13,10 +12,8 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_partition.h"
-#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
-#include "esp_vfs_fat.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "wear_levelling.h"
@@ -102,7 +99,6 @@ static i2c_master_dev_handle_t s_max30102;
 
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 static tinyusb_msc_storage_handle_t s_msc_storage = NULL;
-static bool s_app_storage_ready = false;
 
 static volatile tinyusb_msc_mount_point_t s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB;
 static volatile bool s_msc_transition = false;
@@ -111,21 +107,9 @@ static SemaphoreHandle_t s_log_mutex;
 static FILE *s_log_msc = NULL;
 static int s_log_lines_since_reopen = 0;
 
-#define RECORDING_STATE_SCHEMA_VERSION  2
-
 // Closing the file periodically makes FAT metadata robust against sudden RESET.
 // Trade-off: more directory updates, but much less chance of garbage tail bytes.
 #define LOG_REOPEN_EVERY_N_LINES  20
-
-typedef struct {
-    uint64_t t_ms;
-    uint64_t idx_20hz;
-    uint32_t ir;
-    uint32_t red;
-} log_sample_t;
-
-#define SAMPLE_QUEUE_LEN  256
-static QueueHandle_t s_sample_queue = NULL;
 
 // Recording mode toggled by RESET button:
 // - recording ON  -> GREEN LED, MSC drive hidden (no log.csv on PC), data appended to /data/log.csv
@@ -410,17 +394,9 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
     (void)setvbuf(*fp, NULL, _IONBF, 0);
     const char *hdr =
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
-    #if CONFIG_APP_CSV_COMPACT
         "time_hms,IR_pA,RED_pA\n";
-    #else
-        "t_ms,time_hms,idx_20hz,IR_pA,RED_pA\n";
-    #endif
 #else
-    #if CONFIG_APP_CSV_COMPACT
         "time_hms,IR,RED\n";
-    #else
-        "t_ms,time_hms,idx_20hz,IR,RED\n";
-    #endif
 #endif
     if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
         fclose(*fp);
@@ -459,240 +435,11 @@ static void log_close_all(void)
     s_log_lines_since_reopen = 0;
 }
 
-static bool logging_allowed(void);
-static void apply_recording_mode(void);
-
-static void logger_task(void *arg)
-{
-    (void)arg;
-    log_sample_t s;
-    int lines_since_sync = 0;
-
-    while (true) {
-        if (!logging_allowed()) {
-            // Drop queued samples while not allowed to log.
-            if (s_sample_queue) {
-                (void)xQueueReceive(s_sample_queue, &s, pdMS_TO_TICKS(50));
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-            continue;
-        }
-
-        if (!s_sample_queue) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        if (xQueueReceive(s_sample_queue, &s, pdMS_TO_TICKS(200)) != pdTRUE) {
-            continue;
-        }
-
-        if (!s_log_mutex || xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
-            continue;
-        }
-
-        // MSC/FAT log (only when storage is mounted to APP)
-        if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
-            ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
-        }
-
-        if (s_log_msc) {
-            uint32_t total_s = (uint32_t)(s.t_ms / 1000ULL);
-            uint32_t ms_part = (uint32_t)(s.t_ms % 1000ULL);
-            uint32_t s_part = total_s % 60U;
-            uint32_t m_part = (total_s / 60U) % 60U;
-            uint32_t h_part = (total_s / 3600U);
-
-            // Hours can grow beyond 2 digits; keep buffer generous to avoid -Wformat-truncation.
-            char t_hms[32];
-            // Include milliseconds so 20Hz samples (50ms steps) never repeat timestamps.
-            (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
-                           h_part, m_part, s_part, ms_part);
-
-            char line[128];
-            int len;
-#if CONFIG_APP_CSV_COMPACT
-            len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, s.ir, s.red);
-#else
-            len = snprintf(line, sizeof(line), "%"PRIu64",%s,%"PRIu64",%"PRIu32",%"PRIu32"\n",
-                           s.t_ms, t_hms, s.idx_20hz, s.ir, s.red);
-#endif
-            if (len > 0 && len < (int)sizeof(line)) {
-                size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
-                if (w != (size_t)len) {
-                    ESP_LOGW(TAG, "MSC log write failed (errno=%d)", errno);
-                } else {
-                    s_log_lines_since_reopen++;
-                    lines_since_sync++;
-                    log_reopen_if_needed();
-                }
-            } else {
-                ESP_LOGW(TAG, "MSC log line format overflow");
-            }
-
-            // Periodic sync (fsync is slow; doing it every line reduces effective sample rate).
-            if (lines_since_sync >= 20) {
-                fflush(s_log_msc);
-                (void)fsync(fileno(s_log_msc));
-                lines_since_sync = 0;
-            }
-        }
-
-        xSemaphoreGive(s_log_mutex);
-    }
-}
-
 static bool logging_allowed(void)
 {
-    if (!s_recording_enabled) {
-        return false;
-    }
-
-    if (s_app_storage_ready) {
-        return true;
-    }
-
-    return (!s_msc_transition) &&
+    return s_recording_enabled &&
+           (!s_msc_transition) &&
            (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP);
-}
-
-static void recording_persist_state(bool enabled)
-{
-    nvs_handle_t h;
-    if (nvs_open("app", NVS_READWRITE, &h) != ESP_OK) {
-        return;
-    }
-    (void)nvs_set_u8(h, "rec", enabled ? 1 : 0);
-    (void)nvs_commit(h);
-    nvs_close(h);
-}
-
-static void recording_set_and_restart(bool enabled, const char *reason)
-{
-    ESP_LOGI(TAG, "%s: switching recording %s and restarting",
-             reason, enabled ? "ON" : "OFF");
-
-    s_recording_enabled = enabled;
-    recording_persist_state(enabled);
-
-    if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        log_close_all();
-        xSemaphoreGive(s_log_mutex);
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(100));
-    esp_restart();
-}
-
-#if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON && (CONFIG_APP_BOOT_BUTTON_GPIO != 0)
-static void boot_button_task(void *arg)
-{
-    (void)arg;
-    const gpio_num_t btn = (gpio_num_t)CONFIG_APP_BOOT_BUTTON_GPIO;
-    const int min_press_ms = CONFIG_APP_BOOT_BUTTON_HOLD_MS;
-
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << (int)btn),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    (void)gpio_config(&cfg);
-    ESP_LOGI(TAG, "BOOT button runtime toggle enabled on GPIO%d (press/release >= %dms)",
-             (int)btn, min_press_ms);
-
-    bool was_pressed = false;
-    int64_t pressed_us = 0;
-
-    while (true) {
-        bool pressed = (gpio_get_level(btn) == 0);
-        int64_t now_us = esp_timer_get_time();
-
-        if (pressed && !was_pressed) {
-            pressed_us = now_us;
-        }
-
-        if (!pressed && was_pressed) {
-            int64_t dur_ms = (now_us - pressed_us) / 1000;
-            if (dur_ms >= min_press_ms) {
-                ESP_LOGI(TAG, "BOOT button press detected (%lld ms)", dur_ms);
-                recording_set_and_restart(!s_recording_enabled, "BOOT button");
-            }
-        }
-
-        was_pressed = pressed;
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-#endif
-
-static void cdc_handle_command(const char *cmd)
-{
-    if (strcmp(cmd, "status") == 0) {
-        ESP_LOGI(TAG, "Status: recording=%s storage=%s transition=%s",
-                 s_recording_enabled ? "ON" : "OFF",
-                 (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) ? "APP(hidden)" : "USB(exposed)",
-                 s_msc_transition ? "yes" : "no");
-        return;
-    }
-    if (strcmp(cmd, "msd") == 0 || strcmp(cmd, "off") == 0) {
-        recording_set_and_restart(false, "USB CDC command");
-        return;
-    }
-    if (strcmp(cmd, "rec") == 0 || strcmp(cmd, "on") == 0) {
-        recording_set_and_restart(true, "USB CDC command");
-        return;
-    }
-    if (strcmp(cmd, "toggle") == 0) {
-        recording_set_and_restart(!s_recording_enabled, "USB CDC command");
-        return;
-    }
-
-    ESP_LOGI(TAG, "Unknown USB CDC command '%s' (use: status, msd, rec, toggle)", cmd);
-}
-
-static void cdc_command_task(void *arg)
-{
-    (void)arg;
-#if CONFIG_APP_USB_CDC_CONSOLE
-    char cmd[32];
-    size_t len = 0;
-
-    ESP_LOGI(TAG, "USB CDC commands: status | msd | rec | toggle");
-
-    while (true) {
-        if (!tud_ready()) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        while (tud_cdc_available()) {
-            int ch = tud_cdc_read_char();
-            if (ch < 0) {
-                break;
-            }
-
-            if (ch == '\r' || ch == '\n') {
-                if (len > 0) {
-                    cmd[len] = '\0';
-                    cdc_handle_command(cmd);
-                    len = 0;
-                }
-                continue;
-            }
-
-            if (len < (sizeof(cmd) - 1)) {
-                cmd[len++] = (char)tolower((unsigned char)ch);
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-#else
-    vTaskDelete(NULL);
-#endif
 }
 
 static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
@@ -747,27 +494,9 @@ static void status_led_set_recording(bool recording_enabled)
     (void)recording_enabled;
 }
 
-static const char *reset_reason_str(esp_reset_reason_t r)
-{
-    switch (r) {
-    case ESP_RST_UNKNOWN: return "UNKNOWN";
-    case ESP_RST_POWERON: return "POWERON";
-    case ESP_RST_EXT: return "EXT";
-    case ESP_RST_SW: return "SW";
-    case ESP_RST_PANIC: return "PANIC";
-    case ESP_RST_INT_WDT: return "INT_WDT";
-    case ESP_RST_TASK_WDT: return "TASK_WDT";
-    case ESP_RST_WDT: return "WDT";
-    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
-    case ESP_RST_BROWNOUT: return "BROWNOUT";
-    case ESP_RST_SDIO: return "SDIO";
-    default: return "OTHER";
-    }
-}
-
 static void recording_toggle_on_boot(void)
 {
-    // Persist state in NVS and (optionally) only toggle on external reset button.
+    // Toggle persistent state on every boot (RESET acts like an on/off switch).
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -780,59 +509,20 @@ static void recording_toggle_on_boot(void)
     ESP_ERROR_CHECK(nvs_open("app", NVS_READWRITE, &h));
 
     uint8_t v = 0;
-    uint8_t schema_ver = 0;
-    err = nvs_get_u8(h, "rec_ver", &schema_ver);
-    if (err == ESP_ERR_NVS_NOT_FOUND || schema_ver != RECORDING_STATE_SCHEMA_VERSION) {
-        // Always come up recording ON after flashing/migration so the USB drive is not exposed
-        // immediately by a stale sdkconfig or old saved state.
-        v = 1;
-        ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
-        ESP_ERROR_CHECK(nvs_set_u8(h, "rec_ver", RECORDING_STATE_SCHEMA_VERSION));
-        ESP_ERROR_CHECK(nvs_commit(h));
-        ESP_LOGI(TAG, "Recording state initialized to %s", v ? "ON" : "OFF");
+    err = nvs_get_u8(h, "rec", &v);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        v = 0; // so first boot toggles to ON
     } else {
         ESP_ERROR_CHECK(err);
-        err = nvs_get_u8(h, "rec", &v);
-        if (err == ESP_ERR_NVS_NOT_FOUND) {
-#if CONFIG_APP_RECORDING_DEFAULT_ON
-            v = 1;
-#else
-            v = 0;
-#endif
-            ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
-            ESP_ERROR_CHECK(nvs_commit(h));
-        } else {
-            ESP_ERROR_CHECK(err);
-        }
     }
 
-    esp_reset_reason_t reason = esp_reset_reason();
-    bool do_toggle = false;
-#if CONFIG_APP_RECORDING_TOGGLE_ON_RESET
-    do_toggle = true;
-    #if CONFIG_APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
-    do_toggle = (reason == ESP_RST_EXT);
-    #endif
-#endif
-    if (do_toggle) {
-        v = (uint8_t)(!v);
-        ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
-        ESP_ERROR_CHECK(nvs_commit(h));
-    }
+    v = (uint8_t)(!v);
+    ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
+    ESP_ERROR_CHECK(nvs_commit(h));
     nvs_close(h);
 
     s_recording_enabled = (v != 0);
-    ESP_LOGI(TAG, "Reset reason: %s", reset_reason_str(reason));
-    ESP_LOGI(TAG, "Recording mode: %s%s",
-             s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)",
-#if CONFIG_APP_RECORDING_TOGGLE_ON_RESET && CONFIG_APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
-             " (toggles only on RESET button)"
-#elif CONFIG_APP_RECORDING_TOGGLE_ON_RESET
-             " (toggles on every boot)"
-#else
-             " (preserved across reset; use CDC commands to change)"
-#endif
-    );
+    ESP_LOGI(TAG, "Recording mode: %s (toggled by RESET)", s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
 }
 
 static void storage_mount_changed_cb(tinyusb_msc_storage_handle_t handle, tinyusb_msc_event_t *event, void *arg)
@@ -917,25 +607,6 @@ static esp_err_t msc_storage_init_spiflash(void)
     return ESP_OK;
 }
 
-static esp_err_t app_storage_init_spiflash(void)
-{
-    esp_vfs_fat_mount_config_t mount_cfg = {
-        .format_if_mount_failed = true,
-        .max_files = 5,
-        .allocation_unit_size = 0,
-        .disk_status_check_enable = false,
-        .use_one_fat = false,
-    };
-
-    ESP_LOGI(TAG, "Mounting app FAT filesystem at %s", MSC_FAT_BASE_PATH);
-    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(MSC_FAT_BASE_PATH, "storage", &mount_cfg, &s_wl_handle);
-    if (err == ESP_OK) {
-        s_app_storage_ready = true;
-        s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
-    }
-    return err;
-}
-
 static void apply_recording_mode(void)
 {
     // Ensure files are closed before switching ownership.
@@ -946,19 +617,7 @@ static void apply_recording_mode(void)
         }
     }
 
-    if (s_recording_enabled && s_app_storage_ready) {
-        s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
-        if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            (void)ensure_csv_header(&s_log_msc, MSC_LOG_PATH);
-            log_close_all();
-            xSemaphoreGive(s_log_mutex);
-        }
-        status_led_set_recording(true);
-        return;
-    }
-
     if (!s_msc_storage) {
-        status_led_set_recording(s_recording_enabled);
         return;
     }
 
@@ -966,21 +625,7 @@ static void apply_recording_mode(void)
         // Hide disk from the host and mount to APP for logging
         ESP_ERROR_CHECK(tinyusb_msc_set_storage_mount_point(s_msc_storage, TINYUSB_MSC_STORAGE_MOUNT_APP));
         s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
-
-        // Ensure the CSV exists early so it will be present when later exposed to the PC.
-        if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            (void)ensure_csv_header(&s_log_msc, MSC_LOG_PATH);
-            log_close_all();
-            xSemaphoreGive(s_log_mutex);
-        }
     } else {
-        // Before exposing, best-effort ensure file exists and is closed cleanly.
-        // (Even if our cached mount point is stale, ensure_csv_header() will just fail gracefully.)
-        if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            (void)ensure_csv_header(&s_log_msc, MSC_LOG_PATH);
-            log_close_all();
-            xSemaphoreGive(s_log_mutex);
-        }
         // Expose disk to host and stop logging
         ESP_ERROR_CHECK(tinyusb_msc_set_storage_mount_point(s_msc_storage, TINYUSB_MSC_STORAGE_MOUNT_USB));
         s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB;
@@ -1003,18 +648,14 @@ static void sensor_task(void *arg)
     uint32_t invalid_state_count_window_start_ms = 0;
     int invalid_state_count_in_window = 0;
     bool timebase_set = false;
+    uint64_t t0_ms = 0;
     uint64_t ds_idx = 0;
-    const uint32_t ds_period_ms = (uint32_t)((1000 / RAW_SAMPLE_RATE_HZ) * DOWNSAMPLE_FACTOR); // 50ms at 100->20Hz
+    const uint32_t ds_period_ms = (uint32_t)((1000 / RAW_SAMPLE_RATE_HZ) * DOWNSAMPLE_FACTOR); // 50ms
 
     const int max_samples_per_bulk = 10;
     uint8_t fifo_bulk[6 * 10];
 
     while (true) {
-        if (!s_recording_enabled) {
-            // Stop sampling activity when recording is OFF (drive exposed).
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         if (invalid_state_backoff_until_ms && (now_ms < invalid_state_backoff_until_ms)) {
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -1117,7 +758,7 @@ static void sensor_task(void *arg)
                 raw_ir &= 0x3FFFF;
 
                 if (!timebase_set) {
-                    // Anchor sample clock to first sample read; then advance by the configured sample rate.
+                    t0_ms = (uint64_t)(esp_timer_get_time() / 1000);
                     ds_idx = 0;
                     timebase_set = true;
                 }
@@ -1129,33 +770,52 @@ static void sensor_task(void *arg)
                 if (acc_n >= DOWNSAMPLE_FACTOR) {
                     uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
-                    // Use sample-clock derived timestamp so downsampled rows are exactly 20Hz (50ms steps).
-                    uint64_t sample_t_ms = (ds_idx * (uint64_t)ds_period_ms);
+                    uint64_t t_ms = t0_ms + (ds_idx * (uint64_t)ds_period_ms);
+                    uint32_t total_s = (uint32_t)(t_ms / 1000ULL);
+                    uint32_t ms_part = (uint32_t)(t_ms % 1000ULL);
+                    uint32_t s_part = total_s % 60U;
+                    uint32_t m_part = (total_s / 60U) % 60U;
+                    uint32_t h_part = (total_s / 3600U);
+                    char t_hms[32];
+                    (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
+                                   h_part, m_part, s_part, ms_part);
 
                     uint32_t ir_out = ir_ds;
                     uint32_t red_out = red_ds;
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
                     ir_out = (uint32_t)(((uint64_t)ir_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
                     red_out = (uint32_t)(((uint64_t)red_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
-                    ESP_LOGI(TAG, "t_ms=%"PRIu64" IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
-                             sample_t_ms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+                    ESP_LOGI(TAG, "time=%s IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
+                             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
 #else
-                    ESP_LOGI(TAG, "t_ms=%"PRIu64" IR=%"PRIu32" RED=%"PRIu32"%s",
-                             sample_t_ms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+                    ESP_LOGI(TAG, "time=%s IR=%"PRIu32" RED=%"PRIu32"%s",
+                             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
 #endif
 
-                    if (s_sample_queue && logging_allowed()) {
-                        log_sample_t out = {
-                            .t_ms = sample_t_ms,
-                            .idx_20hz = ds_idx,
-                            .ir = ir_out,
-                            .red = red_out,
-                        };
-                        if (xQueueSend(s_sample_queue, &out, 0) != pdTRUE) {
-                            // Queue full: drop oldest and retry once so logging doesn't "stop".
-                            log_sample_t dropped;
-                            (void)xQueueReceive(s_sample_queue, &dropped, 0);
-                            (void)xQueueSend(s_sample_queue, &out, 0);
+                    if (logging_allowed() && s_log_mutex) {
+                        if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                            // MSC/FAT log (only when storage is mounted to APP)
+                            if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
+                                ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
+                            }
+
+                            if (s_log_msc) {
+                                char line[80];
+                                int len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, ir_out, red_out);
+                                if (len > 0 && len < (int)sizeof(line)) {
+                                    size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
+                                    if (w != (size_t)len) {
+                                        ESP_LOGW(TAG, "MSC log write failed (errno=%d)", errno);
+                                    }
+                                } else {
+                                    ESP_LOGW(TAG, "MSC log line format overflow");
+                                }
+                                fflush(s_log_msc);
+                                (void)fsync(fileno(s_log_msc));
+                                s_log_lines_since_reopen++;
+                                log_reopen_if_needed();
+                            }
+                            xSemaphoreGive(s_log_mutex);
                         }
                     }
 
@@ -1170,7 +830,7 @@ static void sensor_task(void *arg)
         }
 
         // Let FIFO accumulate a bit; avoids hammering I2C.
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -1200,14 +860,13 @@ static char const *s_string_desc_arr[] = {
     "0001",                         // 3: Serial
 };
 
-// USB configuration descriptors
+// USB composite configuration descriptor: CDC (serial) + MSC (drive)
 #define EPNUM_MSC_OUT       0x01
 #define EPNUM_MSC_IN        0x81
 #define EPNUM_CDC_NOTIF     0x82
 #define EPNUM_CDC_OUT       0x03
 #define EPNUM_CDC_IN        0x83
 
-#define TUSB_DESC_CDC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN)
 #define TUSB_DESC_TOTAL_LEN   (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
 
 enum {
@@ -1228,14 +887,6 @@ static uint8_t const s_composite_fs_configuration_desc[] = {
     TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EPNUM_MSC_OUT, EPNUM_MSC_IN, 64),
 };
 
-static uint8_t const s_cdc_only_fs_configuration_desc[] = {
-    // Config number, interface count, string index, total length, attribute, power in mA
-    TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUSB_DESC_CDC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-
-    // CDC: interface number, string index, EP notification address, notification EP size, EP out, EP in, EP size
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 0, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
-};
-
 // ----------------------------- app_main -------------------------------------
 
 static int usb_cdc_vprintf(const char *fmt, va_list ap)
@@ -1251,21 +902,10 @@ static int usb_cdc_vprintf(const char *fmt, va_list ap)
         return vprintf(fmt, ap);
     }
 
-    // Always mirror logs to ROM printf (USB-Serial/JTAG/UART) so you can still monitor even
-    // when the CDC COM port disappears/re-enumerates on Windows.
-    if (len > 0) {
-        size_t n_rom = (size_t)len;
-        if (n_rom >= sizeof(buf)) {
-            n_rom = sizeof(buf) - 1;
-        }
-        buf[n_rom] = '\0';
-        esp_rom_printf("%s", buf);
-    }
-
     // If USB isn't ready yet, fall back to default stdout (usually UART).
     // Note: Some hosts/tools may not assert "connected" line state immediately; writing is still safe.
     if (!tud_ready()) {
-        return len;
+        return vprintf(fmt, ap);
     }
 
     if (len <= 0) {
@@ -1388,7 +1028,15 @@ void app_main(void)
 
     // Show ON/OFF state immediately (not only after USB/MSC init).
     status_led_set_recording(s_recording_enabled);
-    // (Self-test blink removed to avoid confusion with ON/OFF toggle)
+    // Quick self-test blink so it's obvious if the LED works.
+    if (s_status_led_kind == STATUS_LED_KIND_WS2812 || s_status_led_kind == STATUS_LED_KIND_GPIO_DUAL) {
+        vTaskDelay(pdMS_TO_TICKS(80));
+        status_led_set_rgb(64, 0, 0);
+        vTaskDelay(pdMS_TO_TICKS(80));
+        status_led_set_rgb(0, 64, 0);
+        vTaskDelay(pdMS_TO_TICKS(80));
+        status_led_set_recording(s_recording_enabled);
+    }
 
     ESP_LOGI(TAG, "I2C: SDA=GPIO%d SCL=GPIO%d freq=%dHz internal_pullups=%s",
              (int)MAX30102_I2C_SDA_GPIO, (int)MAX30102_I2C_SCL_GPIO, (int)I2C_FREQ_HZ,
@@ -1432,25 +1080,17 @@ void app_main(void)
         ESP_LOGE(TAG, "MAX3010x init failed (%s). Sensor logging will be disabled.", esp_err_to_name(sensor_err));
     }
 
-    // Storage setup:
-    // - recording ON  -> app mounts FAT directly and USB stays CDC-only
-    // - recording OFF -> TinyUSB exposes FAT as MSC to the host
-    if (s_recording_enabled) {
-        ESP_ERROR_CHECK(app_storage_init_spiflash());
-    } else {
-        ESP_ERROR_CHECK(msc_storage_init_spiflash());
-    }
+    // USB MSC storage on internal flash (FATFS + wear levelling)
+    ESP_ERROR_CHECK(msc_storage_init_spiflash());
 
-    ESP_LOGI(TAG, "Installing TinyUSB driver (%s)",
-             s_recording_enabled ? "CDC only" : "CDC + MSC composite");
+    ESP_LOGI(TAG, "Installing TinyUSB driver (CDC + MSC composite)");
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device = &s_device_desc;
-    tusb_cfg.descriptor.full_speed_config = s_recording_enabled ?
-        s_cdc_only_fs_configuration_desc : s_composite_fs_configuration_desc;
+    tusb_cfg.descriptor.full_speed_config = s_composite_fs_configuration_desc;
     tusb_cfg.descriptor.string = s_string_desc_arr;
     tusb_cfg.descriptor.string_count = sizeof(s_string_desc_arr) / sizeof(s_string_desc_arr[0]);
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
-    ESP_LOGI(TAG, "TinyUSB driver installed.");
+    ESP_LOGI(TAG, "TinyUSB driver installed. When the PC mounts the drive, logging is paused. After safe-eject, logging resumes.");
 
     // Route logs to USB CDC without relying on esp_tinyusb helper APIs (they vary across versions).
     if (CONFIG_APP_USB_CDC_CONSOLE) {
@@ -1462,24 +1102,8 @@ void app_main(void)
     // Apply mode after USB + storage are initialized.
     apply_recording_mode();
 
-    // Start tasks regardless of initial mode. Logging is gated by `logging_allowed()`.
-    // This ensures that switching mode later immediately works.
-    s_sample_queue = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(log_sample_t));
-    if (!s_sample_queue) {
-        ESP_LOGE(TAG, "Failed to create sample queue");
-    } else {
-        xTaskCreate(logger_task, "logger", 4096, NULL, 5, NULL);
+    if (s_recording_enabled && sensor_err == ESP_OK) {
         xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, &s_sensor_task);
     }
-
-    xTaskCreate(cdc_command_task, "cdc_cmd", 3072, NULL, 4, NULL);
-
-#if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON && (CONFIG_APP_BOOT_BUTTON_GPIO != 0)
-    // Optional runtime toggle using a non-strapping GPIO button.
-    xTaskCreate(boot_button_task, "boot_btn", 2048, NULL, 4, NULL);
-#elif CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
-    ESP_LOGW(TAG, "BOOT runtime toggle disabled on GPIO%d strapping pin; use CDC commands instead",
-             (int)CONFIG_APP_BOOT_BUTTON_GPIO);
-#endif
 }
 

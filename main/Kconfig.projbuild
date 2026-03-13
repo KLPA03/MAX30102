@@ -178,64 +178,6 @@ menu "MAX3010x Logger"
             config APP_LOG_UNITS_PICOAMPS
                 bool "Photodiode current (pA)"
         endchoice
-
-        config APP_CSV_COMPACT
-            bool "Write compact CSV (time_hms,IR,RED only)"
-            default y
-            help
-                If enabled, CSV contains only:
-                - time_hms (HH:MM:SS.mmm)
-                - IR (or IR_pA)
-                - RED (or RED_pA)
-                Note: milliseconds are included so 20 Hz rows never repeat timestamps.
-    endmenu
-
-    menu "Recording mode"
-        config APP_RECORDING_DEFAULT_ON
-            bool "Default recording state on first boot"
-            default y
-            help
-                If NVS has no saved recording state yet (fresh flash), this selects the initial state.
-                OFF exposes the drive to the PC; ON hides the drive and starts logging.
-
-        config APP_RECORDING_TOGGLE_ON_RESET
-            bool "Toggle recording state during boot"
-            default n
-            help
-                If enabled, the firmware can invert the saved recording state during boot based on
-                reset reason settings below. Keep this disabled if you want flashing/rebooting to
-                always preserve the current state and start recording immediately.
-
-        config APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
-            bool "Toggle recording only on external RESET button"
-            default y
-            depends on APP_RECORDING_TOGGLE_ON_RESET
-            help
-                Prevents unexpected resets (brownout/watchdog) from flipping recording ON/OFF.
-                With this enabled, the state only toggles when reset reason is ESP_RST_EXT.
-
-        config APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
-            bool "Allow BOOT button to toggle recording (no reset)"
-            default y
-            help
-                On ESP32-S3 DevKitC-1, BOOT is GPIO0 (active-low). If enabled, a long press toggles
-                recording ON/OFF at runtime, updates the LED, and hides/exposes the USB drive.
-
-        config APP_BOOT_BUTTON_GPIO
-            int "BOOT button GPIO"
-            range 0 48
-            default 0
-            depends on APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
-            help
-                GPIO connected to BOOT button (active-low).
-
-        config APP_BOOT_BUTTON_HOLD_MS
-            int "BOOT minimum press time (ms)"
-            range 20 3000
-            default 50
-            depends on APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
-            help
-                Minimum BOOT press duration required to toggle recording on button release.
     endmenu
 
     config APP_USB_CDC_CONSOLE
