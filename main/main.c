@@ -109,6 +109,7 @@ static volatile bool s_msc_transition = false;
 static SemaphoreHandle_t s_log_mutex;
 static FILE *s_log_msc = NULL;
 static int s_log_lines_since_reopen = 0;
+static uint64_t s_log_resume_ms = 0;
 
 // Closing the file periodically makes FAT metadata robust against sudden RESET.
 // Trade-off: more directory updates, but much less chance of garbage tail bytes.
@@ -442,6 +443,47 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
     return ESP_FAIL;
 }
 
+static bool parse_csv_time_hms_ms(const char *token, uint64_t *out_ms)
+{
+    unsigned int h = 0;
+    unsigned int m = 0;
+    unsigned int s = 0;
+    unsigned int ms = 0;
+    if (sscanf(token, "%u:%u:%u.%u", &h, &m, &s, &ms) != 4) {
+        return false;
+    }
+    *out_ms = (((uint64_t)h * 60ULL + (uint64_t)m) * 60ULL + (uint64_t)s) * 1000ULL + (uint64_t)ms;
+    return true;
+}
+
+static uint64_t get_next_csv_timestamp_ms(const char *path, uint32_t step_ms)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        return 0;
+    }
+
+    char line[128];
+    uint64_t last_ms = 0;
+    bool have_data = false;
+
+    while (fgets(line, sizeof(line), fp)) {
+        char *comma = strchr(line, ',');
+        if (!comma) {
+            continue;
+        }
+        *comma = '\0';
+        uint64_t parsed_ms = 0;
+        if (parse_csv_time_hms_ms(line, &parsed_ms)) {
+            last_ms = parsed_ms;
+            have_data = true;
+        }
+    }
+
+    fclose(fp);
+    return have_data ? (last_ms + (uint64_t)step_ms) : 0;
+}
+
 static void log_reopen_if_needed(void)
 {
     if (!s_log_msc) {
@@ -687,6 +729,13 @@ static void apply_recording_mode(void)
 
     if (s_app_storage_ready) {
         s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
+        if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) == ESP_OK) {
+                s_log_resume_ms = get_next_csv_timestamp_ms(MSC_LOG_PATH, 50);
+            }
+            log_close_all();
+            xSemaphoreGive(s_log_mutex);
+        }
         status_led_set_recording(s_recording_enabled);
         return;
     }
@@ -831,7 +880,7 @@ static void sensor_task(void *arg)
                 raw_ir &= 0x3FFFF;
 
                 if (!timebase_set) {
-                    ds_idx = 0;
+                    ds_idx = s_log_resume_ms / (uint64_t)ds_period_ms;
                     timebase_set = true;
                 }
 
