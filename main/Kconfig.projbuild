@@ -198,9 +198,18 @@ menu "MAX3010x Logger"
                 If NVS has no saved recording state yet (fresh flash), this selects the initial state.
                 OFF exposes the drive to the PC; ON hides the drive and starts logging.
 
+        config APP_RECORDING_TOGGLE_ON_RESET
+            bool "Toggle recording state during boot"
+            default n
+            help
+                If enabled, the firmware can invert the saved recording state during boot based on
+                reset reason settings below. Keep this disabled if you want flashing/rebooting to
+                always preserve the current state and start recording immediately.
+
         config APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
             bool "Toggle recording only on external RESET button"
             default y
+            depends on APP_RECORDING_TOGGLE_ON_RESET
             help
                 Prevents unexpected resets (brownout/watchdog) from flipping recording ON/OFF.
                 With this enabled, the state only toggles when reset reason is ESP_RST_EXT.

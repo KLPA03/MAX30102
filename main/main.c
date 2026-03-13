@@ -108,7 +108,7 @@ static SemaphoreHandle_t s_log_mutex;
 static FILE *s_log_msc = NULL;
 static int s_log_lines_since_reopen = 0;
 
-#define RECORDING_STATE_SCHEMA_VERSION  1
+#define RECORDING_STATE_SCHEMA_VERSION  2
 
 // Closing the file periodically makes FAT metadata robust against sudden RESET.
 // Trade-off: more directory updates, but much less chance of garbage tail bytes.
@@ -730,9 +730,12 @@ static void recording_toggle_on_boot(void)
     }
 
     esp_reset_reason_t reason = esp_reset_reason();
-    bool do_toggle = true;
-#if CONFIG_APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
+    bool do_toggle = false;
+#if CONFIG_APP_RECORDING_TOGGLE_ON_RESET
+    do_toggle = true;
+    #if CONFIG_APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
     do_toggle = (reason == ESP_RST_EXT);
+    #endif
 #endif
     if (do_toggle) {
         v = (uint8_t)(!v);
@@ -745,10 +748,12 @@ static void recording_toggle_on_boot(void)
     ESP_LOGI(TAG, "Reset reason: %s", reset_reason_str(reason));
     ESP_LOGI(TAG, "Recording mode: %s%s",
              s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)",
-#if CONFIG_APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
+#if CONFIG_APP_RECORDING_TOGGLE_ON_RESET && CONFIG_APP_RECORDING_TOGGLE_ONLY_ON_EXT_RESET
              " (toggles only on RESET button)"
-#else
+#elif CONFIG_APP_RECORDING_TOGGLE_ON_RESET
              " (toggles on every boot)"
+#else
+             " (preserved across reset; use BOOT long-press to change)"
 #endif
     );
 }
