@@ -494,14 +494,16 @@ static void logger_task(void *arg)
 
         if (s_log_msc) {
             uint32_t total_s = (uint32_t)(s.t_ms / 1000ULL);
+            uint32_t ms_part = (uint32_t)(s.t_ms % 1000ULL);
             uint32_t s_part = total_s % 60U;
             uint32_t m_part = (total_s / 60U) % 60U;
             uint32_t h_part = (total_s / 3600U);
 
             // Hours can grow beyond 2 digits; keep buffer generous to avoid -Wformat-truncation.
             char t_hms[32];
-            (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32,
-                           h_part, m_part, s_part);
+            // Include milliseconds so 20Hz samples (50ms steps) never repeat timestamps.
+            (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
+                           h_part, m_part, s_part, ms_part);
 
             char line[128];
             int len;
