@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <unistd.h>
@@ -560,20 +561,20 @@ static void recording_persist_state(bool enabled)
 
 static void recording_set(bool enabled)
 {
-    ESP_LOGI(TAG, "BOOT button: switching recording %s",
+    ESP_LOGI(TAG, "Switching recording %s",
              enabled ? "ON" : "OFF");
 
     s_recording_enabled = enabled;
     recording_persist_state(enabled);
     apply_recording_mode();
-    ESP_LOGI(TAG, "Recording mode: %s (set via BOOT button)",
+    ESP_LOGI(TAG, "Recording mode: %s",
              s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
 }
 
+#if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON && (CONFIG_APP_BOOT_BUTTON_GPIO != 0)
 static void boot_button_task(void *arg)
 {
     (void)arg;
-#if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
     const gpio_num_t btn = (gpio_num_t)CONFIG_APP_BOOT_BUTTON_GPIO;
     const int min_press_ms = CONFIG_APP_BOOT_BUTTON_HOLD_MS;
 
@@ -609,6 +610,74 @@ static void boot_button_task(void *arg)
 
         was_pressed = pressed;
         vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+#endif
+
+static void cdc_handle_command(const char *cmd)
+{
+    if (strcmp(cmd, "status") == 0) {
+        ESP_LOGI(TAG, "Status: recording=%s storage=%s transition=%s",
+                 s_recording_enabled ? "ON" : "OFF",
+                 (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP) ? "APP(hidden)" : "USB(exposed)",
+                 s_msc_transition ? "yes" : "no");
+        return;
+    }
+    if (strcmp(cmd, "msd") == 0 || strcmp(cmd, "off") == 0) {
+        ESP_LOGI(TAG, "USB CDC command: expose MSD");
+        recording_set(false);
+        return;
+    }
+    if (strcmp(cmd, "rec") == 0 || strcmp(cmd, "on") == 0) {
+        ESP_LOGI(TAG, "USB CDC command: enable recording");
+        recording_set(true);
+        return;
+    }
+    if (strcmp(cmd, "toggle") == 0) {
+        ESP_LOGI(TAG, "USB CDC command: toggle recording");
+        recording_set(!s_recording_enabled);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Unknown USB CDC command '%s' (use: status, msd, rec, toggle)", cmd);
+}
+
+static void cdc_command_task(void *arg)
+{
+    (void)arg;
+#if CONFIG_APP_USB_CDC_CONSOLE
+    char cmd[32];
+    size_t len = 0;
+
+    ESP_LOGI(TAG, "USB CDC commands: status | msd | rec | toggle");
+
+    while (true) {
+        if (!tud_ready()) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        while (tud_cdc_available()) {
+            int ch = tud_cdc_read_char();
+            if (ch < 0) {
+                break;
+            }
+
+            if (ch == '\r' || ch == '\n') {
+                if (len > 0) {
+                    cmd[len] = '\0';
+                    cdc_handle_command(cmd);
+                    len = 0;
+                }
+                continue;
+            }
+
+            if (len < (sizeof(cmd) - 1)) {
+                cmd[len++] = (char)tolower((unsigned char)ch);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 #else
     vTaskDelete(NULL);
@@ -750,7 +819,7 @@ static void recording_toggle_on_boot(void)
 #elif CONFIG_APP_RECORDING_TOGGLE_ON_RESET
              " (toggles on every boot)"
 #else
-             " (preserved across reset; use BOOT press/release to change)"
+             " (preserved across reset; use CDC commands to change)"
 #endif
     );
 }
@@ -1335,7 +1404,7 @@ void app_main(void)
     apply_recording_mode();
 
     // Start tasks regardless of initial mode. Logging is gated by `logging_allowed()`.
-    // This ensures that switching mode later (via BOOT press/release or RESET) immediately works.
+    // This ensures that switching mode later immediately works.
     s_sample_queue = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(log_sample_t));
     if (!s_sample_queue) {
         ESP_LOGE(TAG, "Failed to create sample queue");
@@ -1344,7 +1413,14 @@ void app_main(void)
         xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, &s_sensor_task);
     }
 
-    // Optional runtime toggle using BOOT press/release (no reset).
+    xTaskCreate(cdc_command_task, "cdc_cmd", 3072, NULL, 4, NULL);
+
+#if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON && (CONFIG_APP_BOOT_BUTTON_GPIO != 0)
+    // Optional runtime toggle using a non-strapping GPIO button.
     xTaskCreate(boot_button_task, "boot_btn", 2048, NULL, 4, NULL);
+#elif CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
+    ESP_LOGW(TAG, "BOOT runtime toggle disabled on GPIO%d strapping pin; use CDC commands instead",
+             (int)CONFIG_APP_BOOT_BUTTON_GPIO);
+#endif
 }
 
