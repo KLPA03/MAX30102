@@ -521,6 +521,72 @@ static bool logging_allowed(void)
             ((!s_msc_transition) && (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP)));
 }
 
+static void log_sample_row(uint64_t t_ms, uint32_t ir_out, uint32_t red_out)
+{
+    uint32_t total_s = (uint32_t)(t_ms / 1000ULL);
+    uint32_t ms_part = (uint32_t)(t_ms % 1000ULL);
+    uint32_t s_part = total_s % 60U;
+    uint32_t m_part = (total_s / 60U) % 60U;
+    uint32_t h_part = (total_s / 3600U);
+    char t_hms[32];
+    (void)snprintf(t_hms, sizeof(t_hms), "T%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
+                   h_part, m_part, s_part, ms_part);
+
+#if CONFIG_APP_LOG_UNITS_PICOAMPS
+    ESP_LOGI(TAG, "time=%s IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
+             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+#else
+    ESP_LOGI(TAG, "time=%s IR=%"PRIu32" RED=%"PRIu32"%s",
+             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+#endif
+
+    if (logging_allowed() && s_log_mutex) {
+        if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
+                ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
+            }
+
+            if (s_log_msc) {
+                char line[80];
+                int len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, ir_out, red_out);
+                if (len > 0 && len < (int)sizeof(line)) {
+                    size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
+                    if (w != (size_t)len) {
+                        ESP_LOGW(TAG, "MSC log write failed (errno=%d)", errno);
+                    }
+                } else {
+                    ESP_LOGW(TAG, "MSC log line format overflow");
+                }
+                fflush(s_log_msc);
+                (void)fsync(fileno(s_log_msc));
+                s_log_lines_since_reopen++;
+                log_reopen_if_needed();
+            }
+            xSemaphoreGive(s_log_mutex);
+        }
+    }
+}
+
+static void emit_due_rows(uint64_t now_ms,
+                          bool scheduler_started,
+                          uint64_t *next_emit_real_ms,
+                          uint64_t *next_emit_log_ms,
+                          uint32_t step_ms,
+                          bool have_last_sample,
+                          uint32_t last_ir_out,
+                          uint32_t last_red_out)
+{
+    if (!scheduler_started || !have_last_sample) {
+        return;
+    }
+
+    while (now_ms >= *next_emit_real_ms) {
+        log_sample_row(*next_emit_log_ms, last_ir_out, last_red_out);
+        *next_emit_real_ms += (uint64_t)step_ms;
+        *next_emit_log_ms += (uint64_t)step_ms;
+    }
+}
+
 static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
 #if CONFIG_APP_STATUS_LED_PRESET_DEVKITC1 || CONFIG_APP_STATUS_LED_PRESET_CUSTOM
@@ -773,15 +839,21 @@ static void sensor_task(void *arg)
     uint32_t invalid_state_backoff_until_ms = 0;
     uint32_t invalid_state_count_window_start_ms = 0;
     int invalid_state_count_in_window = 0;
-    bool timebase_set = false;
-    uint64_t ds_idx = 0;
     const uint32_t ds_period_ms = (uint32_t)((1000 / RAW_SAMPLE_RATE_HZ) * DOWNSAMPLE_FACTOR); // 50ms
+    bool scheduler_started = false;
+    uint64_t next_emit_real_ms = 0;
+    uint64_t next_emit_log_ms = s_log_resume_ms;
+    bool have_last_sample = false;
+    uint32_t last_ir_out = 0;
+    uint32_t last_red_out = 0;
 
     const int max_samples_per_bulk = 10;
     uint8_t fifo_bulk[6 * 10];
 
     while (true) {
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        emit_due_rows(now_ms, scheduler_started, &next_emit_real_ms, &next_emit_log_ms,
+                      ds_period_ms, have_last_sample, last_ir_out, last_red_out);
         if (invalid_state_backoff_until_ms && (now_ms < invalid_state_backoff_until_ms)) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -882,11 +954,6 @@ static void sensor_task(void *arg)
                 raw_red &= 0x3FFFF;
                 raw_ir &= 0x3FFFF;
 
-                if (!timebase_set) {
-                    ds_idx = s_log_resume_ms / (uint64_t)ds_period_ms;
-                    timebase_set = true;
-                }
-
                 acc_ir += raw_ir;
                 acc_red += raw_red;
                 acc_n++;
@@ -894,56 +961,22 @@ static void sensor_task(void *arg)
                 if (acc_n >= DOWNSAMPLE_FACTOR) {
                     uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
-                    uint64_t t_ms = ds_idx * (uint64_t)ds_period_ms;
-                    uint32_t total_s = (uint32_t)(t_ms / 1000ULL);
-                    uint32_t ms_part = (uint32_t)(t_ms % 1000ULL);
-                    uint32_t s_part = total_s % 60U;
-                    uint32_t m_part = (total_s / 60U) % 60U;
-                    uint32_t h_part = (total_s / 3600U);
-                    char t_hms[32];
-                    (void)snprintf(t_hms, sizeof(t_hms), "T%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
-                                   h_part, m_part, s_part, ms_part);
-
-                    uint32_t ir_out = ir_ds;
-                    uint32_t red_out = red_ds;
+                    last_ir_out = ir_ds;
+                    last_red_out = red_ds;
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
-                    ir_out = (uint32_t)(((uint64_t)ir_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
-                    red_out = (uint32_t)(((uint64_t)red_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
-                    ESP_LOGI(TAG, "time=%s IR_pA=%"PRIu32" RED_pA=%"PRIu32"%s",
-                             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
-#else
-                    ESP_LOGI(TAG, "time=%s IR=%"PRIu32" RED=%"PRIu32"%s",
-                             t_hms, ir_out, red_out, logging_allowed() ? "" : " (paused)");
+                    last_ir_out = (uint32_t)(((uint64_t)ir_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
+                    last_red_out = (uint32_t)(((uint64_t)red_ds * (uint64_t)MAX3010X_ADC_RANGE_NA * 1000ULL) / (uint64_t)MAX3010X_ADC_COUNTS_MAX);
 #endif
+                    have_last_sample = true;
 
-                    if (logging_allowed() && s_log_mutex) {
-                        if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                            // MSC/FAT log (only when storage is mounted to APP)
-                            if (ensure_csv_header(&s_log_msc, MSC_LOG_PATH) != ESP_OK) {
-                                ESP_LOGW(TAG, "MSC log open failed (%s)", MSC_LOG_PATH);
-                            }
-
-                            if (s_log_msc) {
-                                char line[80];
-                                int len = snprintf(line, sizeof(line), "%s,%"PRIu32",%"PRIu32"\n", t_hms, ir_out, red_out);
-                                if (len > 0 && len < (int)sizeof(line)) {
-                                    size_t w = fwrite(line, 1, (size_t)len, s_log_msc);
-                                    if (w != (size_t)len) {
-                                        ESP_LOGW(TAG, "MSC log write failed (errno=%d)", errno);
-                                    }
-                                } else {
-                                    ESP_LOGW(TAG, "MSC log line format overflow");
-                                }
-                                fflush(s_log_msc);
-                                (void)fsync(fileno(s_log_msc));
-                                s_log_lines_since_reopen++;
-                                log_reopen_if_needed();
-                            }
-                            xSemaphoreGive(s_log_mutex);
-                        }
+                    if (!scheduler_started) {
+                        scheduler_started = true;
+                        next_emit_real_ms = (uint64_t)(esp_timer_get_time() / 1000);
                     }
 
-                    ds_idx++;
+                    emit_due_rows((uint64_t)(esp_timer_get_time() / 1000), scheduler_started,
+                                  &next_emit_real_ms, &next_emit_log_ms, ds_period_ms,
+                                  have_last_sample, last_ir_out, last_red_out);
                     acc_ir = 0;
                     acc_red = 0;
                     acc_n = 0;
