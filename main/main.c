@@ -108,6 +108,8 @@ static SemaphoreHandle_t s_log_mutex;
 static FILE *s_log_msc = NULL;
 static int s_log_lines_since_reopen = 0;
 
+#define RECORDING_STATE_SCHEMA_VERSION  1
+
 // Closing the file periodically makes FAT metadata robust against sudden RESET.
 // Trade-off: more directory updates, but much less chance of garbage tail bytes.
 #define LOG_REOPEN_EVERY_N_LINES  20
@@ -699,17 +701,32 @@ static void recording_toggle_on_boot(void)
     ESP_ERROR_CHECK(nvs_open("app", NVS_READWRITE, &h));
 
     uint8_t v = 0;
-    err = nvs_get_u8(h, "rec", &v);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
+    uint8_t schema_ver = 0;
+    err = nvs_get_u8(h, "rec_ver", &schema_ver);
+    if (err == ESP_ERR_NVS_NOT_FOUND || schema_ver != RECORDING_STATE_SCHEMA_VERSION) {
 #if CONFIG_APP_RECORDING_DEFAULT_ON
         v = 1;
 #else
         v = 0;
 #endif
         ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
+        ESP_ERROR_CHECK(nvs_set_u8(h, "rec_ver", RECORDING_STATE_SCHEMA_VERSION));
         ESP_ERROR_CHECK(nvs_commit(h));
+        ESP_LOGI(TAG, "Recording state initialized to %s", v ? "ON" : "OFF");
     } else {
         ESP_ERROR_CHECK(err);
+        err = nvs_get_u8(h, "rec", &v);
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+#if CONFIG_APP_RECORDING_DEFAULT_ON
+            v = 1;
+#else
+            v = 0;
+#endif
+            ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
+            ESP_ERROR_CHECK(nvs_commit(h));
+        } else {
+            ESP_ERROR_CHECK(err);
+        }
     }
 
     esp_reset_reason_t reason = esp_reset_reason();

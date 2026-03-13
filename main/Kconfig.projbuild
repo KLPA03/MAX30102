@@ -193,7 +193,7 @@ menu "MAX3010x Logger"
     menu "Recording mode"
         config APP_RECORDING_DEFAULT_ON
             bool "Default recording state on first boot"
-            default n
+            default y
             help
                 If NVS has no saved recording state yet (fresh flash), this selects the initial state.
                 OFF exposes the drive to the PC; ON hides the drive and starts logging.
