@@ -146,6 +146,7 @@ static bool i2c_probe_max3010x(void);
 static esp_err_t max30102_init_100hz(void);
 static esp_err_t max30102_get_unread_samples(uint8_t *unread);
 static esp_err_t app_storage_init_spiflash(void);
+static esp_err_t app_storage_format_spiflash(void);
 
 static void i2c_bus_unlock_gpio(gpio_num_t sda, gpio_num_t scl)
 {
