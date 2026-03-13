@@ -558,18 +558,9 @@ static void recording_persist_state(bool enabled)
     nvs_close(h);
 }
 
-static void recording_set(bool enabled)
-{
-    s_recording_enabled = enabled;
-    recording_persist_state(enabled);
-    apply_recording_mode();
-    ESP_LOGI(TAG, "Recording mode: %s (set via BOOT button)",
-             s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
-}
-
 static void recording_set_and_restart(bool enabled)
 {
-    ESP_LOGI(TAG, "BOOT long-press: switching recording %s and restarting",
+    ESP_LOGI(TAG, "BOOT button: switching recording %s and restarting",
              enabled ? "ON" : "OFF");
 
     s_recording_enabled = enabled;
@@ -590,7 +581,7 @@ static void boot_button_task(void *arg)
     (void)arg;
 #if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
     const gpio_num_t btn = (gpio_num_t)CONFIG_APP_BOOT_BUTTON_GPIO;
-    const int hold_ms = CONFIG_APP_BOOT_BUTTON_HOLD_MS;
+    const int min_press_ms = 50;
 
     gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << (int)btn),
@@ -600,10 +591,11 @@ static void boot_button_task(void *arg)
         .intr_type = GPIO_INTR_DISABLE,
     };
     (void)gpio_config(&cfg);
+    ESP_LOGI(TAG, "BOOT button runtime toggle enabled on GPIO%d (press/release >= %dms)",
+             (int)btn, min_press_ms);
 
     bool was_pressed = false;
     int64_t pressed_us = 0;
-    bool toggled_this_press = false;
 
     while (true) {
         bool pressed = (gpio_get_level(btn) == 0);
@@ -611,22 +603,18 @@ static void boot_button_task(void *arg)
 
         if (pressed && !was_pressed) {
             pressed_us = now_us;
-            toggled_this_press = false;
         }
 
-        if (pressed && !toggled_this_press) {
+        if (!pressed && was_pressed) {
             int64_t dur_ms = (now_us - pressed_us) / 1000;
-            if (dur_ms >= hold_ms) {
+            if (dur_ms >= min_press_ms) {
+                ESP_LOGI(TAG, "BOOT button press detected (%lld ms)", dur_ms);
                 recording_set_and_restart(!s_recording_enabled);
-                toggled_this_press = true;
             }
         }
 
-        if (!pressed) {
-            toggled_this_press = false;
-        }
         was_pressed = pressed;
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 #else
     vTaskDelete(NULL);
