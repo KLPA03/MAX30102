@@ -559,16 +559,21 @@ static void recording_persist_state(bool enabled)
     nvs_close(h);
 }
 
-static void recording_set(bool enabled)
+static void recording_set_and_restart(bool enabled, const char *reason)
 {
-    ESP_LOGI(TAG, "Switching recording %s",
-             enabled ? "ON" : "OFF");
+    ESP_LOGI(TAG, "%s: switching recording %s and restarting",
+             reason, enabled ? "ON" : "OFF");
 
     s_recording_enabled = enabled;
     recording_persist_state(enabled);
-    apply_recording_mode();
-    ESP_LOGI(TAG, "Recording mode: %s",
-             s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
+
+    if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        log_close_all();
+        xSemaphoreGive(s_log_mutex);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
 }
 
 #if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON && (CONFIG_APP_BOOT_BUTTON_GPIO != 0)
@@ -604,7 +609,7 @@ static void boot_button_task(void *arg)
             int64_t dur_ms = (now_us - pressed_us) / 1000;
             if (dur_ms >= min_press_ms) {
                 ESP_LOGI(TAG, "BOOT button press detected (%lld ms)", dur_ms);
-                recording_set(!s_recording_enabled);
+                recording_set_and_restart(!s_recording_enabled, "BOOT button");
             }
         }
 
@@ -624,18 +629,15 @@ static void cdc_handle_command(const char *cmd)
         return;
     }
     if (strcmp(cmd, "msd") == 0 || strcmp(cmd, "off") == 0) {
-        ESP_LOGI(TAG, "USB CDC command: expose MSD");
-        recording_set(false);
+        recording_set_and_restart(false, "USB CDC command");
         return;
     }
     if (strcmp(cmd, "rec") == 0 || strcmp(cmd, "on") == 0) {
-        ESP_LOGI(TAG, "USB CDC command: enable recording");
-        recording_set(true);
+        recording_set_and_restart(true, "USB CDC command");
         return;
     }
     if (strcmp(cmd, "toggle") == 0) {
-        ESP_LOGI(TAG, "USB CDC command: toggle recording");
-        recording_set(!s_recording_enabled);
+        recording_set_and_restart(!s_recording_enabled, "USB CDC command");
         return;
     }
 
@@ -1158,13 +1160,14 @@ static char const *s_string_desc_arr[] = {
     "0001",                         // 3: Serial
 };
 
-// USB composite configuration descriptor: CDC (serial) + MSC (drive)
+// USB configuration descriptors
 #define EPNUM_MSC_OUT       0x01
 #define EPNUM_MSC_IN        0x81
 #define EPNUM_CDC_NOTIF     0x82
 #define EPNUM_CDC_OUT       0x03
 #define EPNUM_CDC_IN        0x83
 
+#define TUSB_DESC_CDC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN)
 #define TUSB_DESC_TOTAL_LEN   (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
 
 enum {
@@ -1183,6 +1186,14 @@ static uint8_t const s_composite_fs_configuration_desc[] = {
 
     // MSC: interface number, string index, EP out, EP in, EP size
     TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EPNUM_MSC_OUT, EPNUM_MSC_IN, 64),
+};
+
+static uint8_t const s_cdc_only_fs_configuration_desc[] = {
+    // Config number, interface count, string index, total length, attribute, power in mA
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUSB_DESC_CDC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+
+    // CDC: interface number, string index, EP notification address, notification EP size, EP out, EP in, EP size
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 0, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
 };
 
 // ----------------------------- app_main -------------------------------------
@@ -1384,14 +1395,16 @@ void app_main(void)
     // USB MSC storage on internal flash (FATFS + wear levelling)
     ESP_ERROR_CHECK(msc_storage_init_spiflash());
 
-    ESP_LOGI(TAG, "Installing TinyUSB driver (CDC + MSC composite)");
+    ESP_LOGI(TAG, "Installing TinyUSB driver (%s)",
+             s_recording_enabled ? "CDC only" : "CDC + MSC composite");
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device = &s_device_desc;
-    tusb_cfg.descriptor.full_speed_config = s_composite_fs_configuration_desc;
+    tusb_cfg.descriptor.full_speed_config = s_recording_enabled ?
+        s_cdc_only_fs_configuration_desc : s_composite_fs_configuration_desc;
     tusb_cfg.descriptor.string = s_string_desc_arr;
     tusb_cfg.descriptor.string_count = sizeof(s_string_desc_arr) / sizeof(s_string_desc_arr[0]);
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
-    ESP_LOGI(TAG, "TinyUSB driver installed. When the PC mounts the drive, logging is paused. After safe-eject, logging resumes.");
+    ESP_LOGI(TAG, "TinyUSB driver installed.");
 
     // Route logs to USB CDC without relying on esp_tinyusb helper APIs (they vary across versions).
     if (CONFIG_APP_USB_CDC_CONSOLE) {
