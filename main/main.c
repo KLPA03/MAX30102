@@ -558,7 +558,7 @@ static void recording_persist_state(bool enabled)
     nvs_close(h);
 }
 
-static void recording_set_and_restart(bool enabled)
+static void recording_set_and_restart(bool enabled, gpio_num_t btn_gpio)
 {
     ESP_LOGI(TAG, "BOOT button: switching recording %s and restarting",
              enabled ? "ON" : "OFF");
@@ -571,7 +571,26 @@ static void recording_set_and_restart(bool enabled)
         xSemaphoreGive(s_log_mutex);
     }
 
-    // Let the log line flush out before restarting into the new USB/storage mode.
+    // GPIO0 is a strapping pin. Wait for the BOOT button to be released and stable high
+    // so the restart returns to the application instead of the ROM download mode.
+    const TickType_t stable_needed = pdMS_TO_TICKS(150);
+    const TickType_t timeout = pdMS_TO_TICKS(2000);
+    TickType_t stable_start = 0;
+    TickType_t start = xTaskGetTickCount();
+
+    while ((xTaskGetTickCount() - start) < timeout) {
+        bool released = (gpio_get_level(btn_gpio) != 0);
+        if (!released) {
+            stable_start = 0;
+        } else if (stable_start == 0) {
+            stable_start = xTaskGetTickCount();
+        } else if ((xTaskGetTickCount() - stable_start) >= stable_needed) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // Let the final log lines flush out before restarting into the new USB/storage mode.
     vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
 }
@@ -609,7 +628,7 @@ static void boot_button_task(void *arg)
             int64_t dur_ms = (now_us - pressed_us) / 1000;
             if (dur_ms >= min_press_ms) {
                 ESP_LOGI(TAG, "BOOT button press detected (%lld ms)", dur_ms);
-                recording_set_and_restart(!s_recording_enabled);
+                recording_set_and_restart(!s_recording_enabled, btn);
             }
         }
 
