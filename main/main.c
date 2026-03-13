@@ -722,7 +722,6 @@ static void sensor_task(void *arg)
     uint32_t invalid_state_count_window_start_ms = 0;
     int invalid_state_count_in_window = 0;
     bool timebase_set = false;
-    uint64_t t0_ms = 0;
     uint64_t ds_idx = 0;
     const uint32_t ds_period_ms = (uint32_t)((1000 / RAW_SAMPLE_RATE_HZ) * DOWNSAMPLE_FACTOR); // 50ms
 
@@ -832,7 +831,6 @@ static void sensor_task(void *arg)
                 raw_ir &= 0x3FFFF;
 
                 if (!timebase_set) {
-                    t0_ms = (uint64_t)(esp_timer_get_time() / 1000);
                     ds_idx = 0;
                     timebase_set = true;
                 }
@@ -844,7 +842,7 @@ static void sensor_task(void *arg)
                 if (acc_n >= DOWNSAMPLE_FACTOR) {
                     uint32_t ir_ds = (uint32_t)(acc_ir / DOWNSAMPLE_FACTOR);
                     uint32_t red_ds = (uint32_t)(acc_red / DOWNSAMPLE_FACTOR);
-                    uint64_t t_ms = t0_ms + (ds_idx * (uint64_t)ds_period_ms);
+                    uint64_t t_ms = ds_idx * (uint64_t)ds_period_ms;
                     uint32_t total_s = (uint32_t)(t_ms / 1000ULL);
                     uint32_t ms_part = (uint32_t)(t_ms % 1000ULL);
                     uint32_t s_part = total_s % 60U;
