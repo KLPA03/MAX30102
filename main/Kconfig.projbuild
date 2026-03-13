@@ -1,0 +1,191 @@
+menu "MAX3010x Logger"
+
+    menu "I2C (MAX3010x)"
+        config APP_I2C_SDA_GPIO
+            int "SDA GPIO"
+            range 0 48
+            default 8
+            help
+                I2C SDA pin connected to MAX3010x SDA.
+
+        config APP_I2C_SCL_GPIO
+            int "SCL GPIO"
+            range 0 48
+            default 9
+            help
+                I2C SCL pin connected to MAX3010x SCL.
+
+        config APP_I2C_FREQ_HZ
+            int "I2C frequency (Hz)"
+            range 10000 400000
+            default 50000
+            help
+                Lower frequencies are more robust with long wires / weak pull-ups.
+                50kHz is a safe default for breadboards.
+
+        config APP_I2C_ENABLE_INTERNAL_PULLUPS
+            bool "Enable internal pull-ups"
+            default y
+            help
+                Enables ESP32-S3 internal pull-ups on SDA/SCL.
+                External 4.7k pull-ups to 3.3V are still strongly recommended.
+
+        config APP_I2C_RECOVERY_ENABLED
+            bool "Enable I2C bus recovery (SCL toggling)"
+            default y
+            help
+                If the bus gets stuck (SDA low) or repeated transactions fail, the firmware will:
+                - delete the I2C driver
+                - toggle SCL to release the slave
+                - re-init I2C and re-configure the sensor
+
+        config APP_SUPPRESS_IDF_I2C_MASTER_ERRORS
+            bool "Suppress ESP-IDF i2c.master error logs"
+            default y
+            help
+                ESP-IDF prints error logs for each failed I2C transaction. If enabled, those logs are muted
+                and the app will print its own rate-limited warnings instead.
+
+        choice APP_MAX3010X_ADC_RANGE
+            prompt "MAX3010x ADC range"
+            default APP_MAX3010X_ADC_RANGE_8192NA
+            help
+                ADC full-scale range. This impacts the conversion to picoamps (pA) and the maximum
+                representable pA value:
+                - 4096 nA -> 4,096,000 pA max
+                - 8192 nA -> 8,192,000 pA max (enough for Kaggle-style ~7 million values)
+                Higher range reduces resolution (bigger LSB).
+
+            config APP_MAX3010X_ADC_RANGE_2048NA
+                bool "2048 nA (2,048,000 pA max)"
+
+            config APP_MAX3010X_ADC_RANGE_4096NA
+                bool "4096 nA (4,096,000 pA max)"
+
+            config APP_MAX3010X_ADC_RANGE_8192NA
+                bool "8192 nA (8,192,000 pA max)"
+
+            config APP_MAX3010X_ADC_RANGE_16384NA
+                bool "16384 nA (16,384,000 pA max)"
+        endchoice
+    endmenu
+
+    menu "MAX3010x Sensor"
+        config APP_MAX3010X_LED_RED_PA
+            int "RED LED pulse amplitude (0..255)"
+            range 0 255
+            default 36
+            help
+                Value written to LED1_PA (RED). Higher = more LED current, higher signal.
+                Start low and increase gradually to avoid saturation and heating.
+
+        config APP_MAX3010X_LED_IR_PA
+            int "IR LED pulse amplitude (0..255)"
+            range 0 255
+            default 36
+            help
+                Value written to LED2_PA (IR). Higher = more LED current, higher signal.
+                Start low and increase gradually to avoid saturation and heating.
+    endmenu
+
+    menu "Status LED"
+        choice APP_STATUS_LED_PRESET
+            prompt "Board LED preset"
+            default APP_STATUS_LED_PRESET_DEVKITC1
+            help
+                If your LED is on-board ("embedded"), pick a preset for your dev board so you don't need to
+                know the GPIO. If your board isn't listed, choose Custom and set the LED wiring manually.
+
+            config APP_STATUS_LED_PRESET_DEVKITC1
+                bool "ESP32-S3 DevKitC-1 v1.0 onboard RGB (WS2812 on GPIO48)"
+
+            config APP_STATUS_LED_PRESET_DEVKITC1_V1_1
+                bool "ESP32-S3 DevKitC-1 v1.1 onboard RGB (WS2812 on GPIO38)"
+
+            config APP_STATUS_LED_PRESET_WS2812_GPIO33
+                bool "WS2812 onboard RGB (GPIO33) (e.g. Adafruit Feather ESP32-S3)"
+
+            config APP_STATUS_LED_PRESET_WS2812_GPIO21
+                bool "WS2812 onboard RGB (GPIO21) (e.g. Seeed XIAO ESP32-S3 / ESP32-S3-Zero)"
+
+            config APP_STATUS_LED_PRESET_CUSTOM
+                bool "Custom (set LED type/pins below)"
+
+            config APP_STATUS_LED_PRESET_DISABLED
+                bool "Disabled"
+        endchoice
+
+        choice APP_STATUS_LED_MODE
+            prompt "LED type"
+            default APP_STATUS_LED_WS2812
+            depends on APP_STATUS_LED_PRESET_CUSTOM
+            help
+                Select how to drive the on-board status LED.
+
+            config APP_STATUS_LED_WS2812
+                bool "WS2812 / addressable RGB (via led_strip)"
+
+            config APP_STATUS_LED_GPIO_DUAL
+                bool "Two GPIO LEDs (RED + GREEN)"
+
+            config APP_STATUS_LED_DISABLED
+                bool "Disabled"
+        endchoice
+
+        config APP_STATUS_LED_WS2812_GPIO
+            int "WS2812 GPIO"
+            range 0 48
+            default 48
+            depends on APP_STATUS_LED_WS2812 && APP_STATUS_LED_PRESET_CUSTOM
+            help
+                GPIO connected to the WS2812 data input.
+
+        config APP_STATUS_LED_GPIO_RED
+            int "RED LED GPIO"
+            range 0 48
+            default 1
+            depends on APP_STATUS_LED_GPIO_DUAL && APP_STATUS_LED_PRESET_CUSTOM
+            help
+                GPIO connected to the RED indicator LED.
+
+        config APP_STATUS_LED_GPIO_GREEN
+            int "GREEN LED GPIO"
+            range 0 48
+            default 2
+            depends on APP_STATUS_LED_GPIO_DUAL && APP_STATUS_LED_PRESET_CUSTOM
+            help
+                GPIO connected to the GREEN indicator LED.
+
+        config APP_STATUS_LED_GPIO_ACTIVE_LOW
+            bool "GPIO LEDs are active-low"
+            default y
+            depends on APP_STATUS_LED_GPIO_DUAL && APP_STATUS_LED_PRESET_CUSTOM
+            help
+                Enable if the LED turns ON when the GPIO is driven LOW (common-anode LEDs).
+    endmenu
+
+    menu "Logging"
+        choice APP_LOG_UNITS
+            prompt "IR/RED units"
+            default APP_LOG_UNITS_COUNTS
+            help
+                MAX3010x FIFO samples are 18-bit raw ADC counts (0..262143).
+                If you want 7-digit "real" values, you can log converted photodiode current in picoamps.
+
+            config APP_LOG_UNITS_COUNTS
+                bool "Raw counts (18-bit)"
+
+            config APP_LOG_UNITS_PICOAMPS
+                bool "Photodiode current (pA)"
+        endchoice
+    endmenu
+
+    config APP_USB_CDC_CONSOLE
+        bool "Send ESP_LOG output to USB CDC (native USB)"
+        default y
+        help
+            If enabled, ESP_LOG output is routed to the TinyUSB CDC interface (COM port).
+            This avoids depending on esp_tinyusb console helper APIs that vary across versions.
+
+endmenu
+
