@@ -14,6 +14,7 @@
 #include "esp_partition.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
+#include "esp_vfs_fat.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "wear_levelling.h"
@@ -99,6 +100,7 @@ static i2c_master_dev_handle_t s_max30102;
 
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 static tinyusb_msc_storage_handle_t s_msc_storage = NULL;
+static bool s_app_storage_ready = false;
 
 static volatile tinyusb_msc_mount_point_t s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB;
 static volatile bool s_msc_transition = false;
@@ -438,8 +440,8 @@ static void log_close_all(void)
 static bool logging_allowed(void)
 {
     return s_recording_enabled &&
-           (!s_msc_transition) &&
-           (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP);
+           (s_app_storage_ready ||
+            ((!s_msc_transition) && (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP)));
 }
 
 static void status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
@@ -607,6 +609,26 @@ static esp_err_t msc_storage_init_spiflash(void)
     return ESP_OK;
 }
 
+static esp_err_t app_storage_init_spiflash(void)
+{
+    esp_vfs_fat_mount_config_t mount_cfg = {
+        .format_if_mount_failed = true,
+        .max_files = 5,
+        .allocation_unit_size = 0,
+        .disk_status_check_enable = false,
+        .use_one_fat = false,
+    };
+
+    ESP_LOGI(TAG, "Mounting app FAT filesystem at %s", MSC_FAT_BASE_PATH);
+    ESP_RETURN_ON_ERROR(
+        esp_vfs_fat_spiflash_mount_rw_wl(MSC_FAT_BASE_PATH, "storage", &mount_cfg, &s_wl_handle),
+        TAG, "esp_vfs_fat_spiflash_mount_rw_wl failed");
+
+    s_app_storage_ready = true;
+    s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
+    return ESP_OK;
+}
+
 static void apply_recording_mode(void)
 {
     // Ensure files are closed before switching ownership.
@@ -615,6 +637,12 @@ static void apply_recording_mode(void)
             log_close_all();
             xSemaphoreGive(s_log_mutex);
         }
+    }
+
+    if (s_app_storage_ready) {
+        s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
+        status_led_set_recording(s_recording_enabled);
+        return;
     }
 
     if (!s_msc_storage) {
@@ -860,13 +888,14 @@ static char const *s_string_desc_arr[] = {
     "0001",                         // 3: Serial
 };
 
-// USB composite configuration descriptor: CDC (serial) + MSC (drive)
+// USB descriptors
 #define EPNUM_MSC_OUT       0x01
 #define EPNUM_MSC_IN        0x81
 #define EPNUM_CDC_NOTIF     0x82
 #define EPNUM_CDC_OUT       0x03
 #define EPNUM_CDC_IN        0x83
 
+#define TUSB_DESC_CDC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN)
 #define TUSB_DESC_TOTAL_LEN   (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_MSC_DESC_LEN)
 
 enum {
@@ -885,6 +914,11 @@ static uint8_t const s_composite_fs_configuration_desc[] = {
 
     // MSC: interface number, string index, EP out, EP in, EP size
     TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EPNUM_MSC_OUT, EPNUM_MSC_IN, 64),
+};
+
+static uint8_t const s_cdc_only_fs_configuration_desc[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUSB_DESC_CDC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 0, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
 };
 
 // ----------------------------- app_main -------------------------------------
@@ -1080,17 +1114,24 @@ void app_main(void)
         ESP_LOGE(TAG, "MAX3010x init failed (%s). Sensor logging will be disabled.", esp_err_to_name(sensor_err));
     }
 
-    // USB MSC storage on internal flash (FATFS + wear levelling)
-    ESP_ERROR_CHECK(msc_storage_init_spiflash());
+    // Storage/USB mode:
+    // - recording ON  -> app mounts FAT directly, USB exposes CDC only
+    // - recording OFF -> TinyUSB exposes CDC + MSC to the host
+    if (s_recording_enabled) {
+        ESP_ERROR_CHECK(app_storage_init_spiflash());
+    } else {
+        ESP_ERROR_CHECK(msc_storage_init_spiflash());
+    }
 
-    ESP_LOGI(TAG, "Installing TinyUSB driver (CDC + MSC composite)");
+    ESP_LOGI(TAG, "Installing TinyUSB driver (%s)", s_recording_enabled ? "CDC only" : "CDC + MSC composite");
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device = &s_device_desc;
-    tusb_cfg.descriptor.full_speed_config = s_composite_fs_configuration_desc;
+    tusb_cfg.descriptor.full_speed_config =
+        s_recording_enabled ? s_cdc_only_fs_configuration_desc : s_composite_fs_configuration_desc;
     tusb_cfg.descriptor.string = s_string_desc_arr;
     tusb_cfg.descriptor.string_count = sizeof(s_string_desc_arr) / sizeof(s_string_desc_arr[0]);
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
-    ESP_LOGI(TAG, "TinyUSB driver installed. When the PC mounts the drive, logging is paused. After safe-eject, logging resumes.");
+    ESP_LOGI(TAG, "TinyUSB driver installed.");
 
     // Route logs to USB CDC without relying on esp_tinyusb helper APIs (they vary across versions).
     if (CONFIG_APP_USB_CDC_CONSOLE) {
