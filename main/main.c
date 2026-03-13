@@ -101,6 +101,7 @@ static i2c_master_dev_handle_t s_max30102;
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 static tinyusb_msc_storage_handle_t s_msc_storage = NULL;
 static bool s_app_storage_ready = false;
+static bool s_app_storage_reformatted = false;
 
 static volatile tinyusb_msc_mount_point_t s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB;
 static volatile bool s_msc_transition = false;
@@ -378,7 +379,7 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
         return ESP_OK;
     }
 
-    for (int attempt = 0; attempt < 2; attempt++) {
+    for (int attempt = 0; attempt < 3; attempt++) {
         // Check if file exists and non-empty
         FILE *fr = fopen(path, "r");
         if (fr) {
@@ -412,17 +413,30 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
             return ESP_OK;
         }
 
-        if (!(s_recording_enabled && s_app_storage_ready) || attempt > 0) {
+        if (!(s_recording_enabled && s_app_storage_ready)) {
             break;
         }
 
-        ESP_LOGW(TAG, "CSV open failed on %s, remounting app storage (errno=%d)", path, errno);
-        esp_vfs_fat_spiflash_unmount_rw_wl(MSC_FAT_BASE_PATH, s_wl_handle);
-        s_wl_handle = WL_INVALID_HANDLE;
-        s_app_storage_ready = false;
-        if (app_storage_init_spiflash() != ESP_OK) {
-            break;
+        if (attempt == 0) {
+            ESP_LOGW(TAG, "CSV open failed on %s, remounting app storage (errno=%d)", path, errno);
+            esp_vfs_fat_spiflash_unmount_rw_wl(MSC_FAT_BASE_PATH, s_wl_handle);
+            s_wl_handle = WL_INVALID_HANDLE;
+            s_app_storage_ready = false;
+            if (app_storage_init_spiflash() != ESP_OK) {
+                break;
+            }
+            continue;
         }
+
+        if (attempt == 1 && !s_app_storage_reformatted) {
+            if (app_storage_format_spiflash() != ESP_OK) {
+                break;
+            }
+            s_app_storage_reformatted = true;
+            continue;
+        }
+
+        break;
     }
     return ESP_FAIL;
 }
@@ -644,6 +658,20 @@ static esp_err_t app_storage_init_spiflash(void)
     s_app_storage_ready = true;
     s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
     return ESP_OK;
+}
+
+static esp_err_t app_storage_format_spiflash(void)
+{
+    esp_vfs_fat_mount_config_t mount_cfg = {
+        .format_if_mount_failed = true,
+        .max_files = 5,
+        .allocation_unit_size = 0,
+        .disk_status_check_enable = false,
+        .use_one_fat = false,
+    };
+
+    ESP_LOGW(TAG, "Formatting app FAT filesystem at %s", MSC_FAT_BASE_PATH);
+    return esp_vfs_fat_spiflash_format_cfg_rw_wl(MSC_FAT_BASE_PATH, "storage", &mount_cfg);
 }
 
 static void apply_recording_mode(void)
