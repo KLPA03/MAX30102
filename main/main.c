@@ -16,6 +16,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
+#include "esp_vfs_fat.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "wear_levelling.h"
@@ -101,6 +102,7 @@ static i2c_master_dev_handle_t s_max30102;
 
 static wl_handle_t s_wl_handle = WL_INVALID_HANDLE;
 static tinyusb_msc_storage_handle_t s_msc_storage = NULL;
+static bool s_app_storage_ready = false;
 
 static volatile tinyusb_msc_mount_point_t s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB;
 static volatile bool s_msc_transition = false;
@@ -543,8 +545,15 @@ static void logger_task(void *arg)
 
 static bool logging_allowed(void)
 {
-    return s_recording_enabled &&
-           (!s_msc_transition) &&
+    if (!s_recording_enabled) {
+        return false;
+    }
+
+    if (s_app_storage_ready) {
+        return true;
+    }
+
+    return (!s_msc_transition) &&
            (s_msc_mount_point == TINYUSB_MSC_STORAGE_MOUNT_APP);
 }
 
@@ -908,6 +917,25 @@ static esp_err_t msc_storage_init_spiflash(void)
     return ESP_OK;
 }
 
+static esp_err_t app_storage_init_spiflash(void)
+{
+    esp_vfs_fat_mount_config_t mount_cfg = {
+        .format_if_mount_failed = true,
+        .max_files = 5,
+        .allocation_unit_size = 0,
+        .disk_status_check_enable = false,
+        .use_one_fat = false,
+    };
+
+    ESP_LOGI(TAG, "Mounting app FAT filesystem at %s", MSC_FAT_BASE_PATH);
+    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(MSC_FAT_BASE_PATH, "storage", &mount_cfg, &s_wl_handle);
+    if (err == ESP_OK) {
+        s_app_storage_ready = true;
+        s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
+    }
+    return err;
+}
+
 static void apply_recording_mode(void)
 {
     // Ensure files are closed before switching ownership.
@@ -918,7 +946,19 @@ static void apply_recording_mode(void)
         }
     }
 
+    if (s_recording_enabled && s_app_storage_ready) {
+        s_msc_mount_point = TINYUSB_MSC_STORAGE_MOUNT_APP;
+        if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            (void)ensure_csv_header(&s_log_msc, MSC_LOG_PATH);
+            log_close_all();
+            xSemaphoreGive(s_log_mutex);
+        }
+        status_led_set_recording(true);
+        return;
+    }
+
     if (!s_msc_storage) {
+        status_led_set_recording(s_recording_enabled);
         return;
     }
 
@@ -1392,8 +1432,14 @@ void app_main(void)
         ESP_LOGE(TAG, "MAX3010x init failed (%s). Sensor logging will be disabled.", esp_err_to_name(sensor_err));
     }
 
-    // USB MSC storage on internal flash (FATFS + wear levelling)
-    ESP_ERROR_CHECK(msc_storage_init_spiflash());
+    // Storage setup:
+    // - recording ON  -> app mounts FAT directly and USB stays CDC-only
+    // - recording OFF -> TinyUSB exposes FAT as MSC to the host
+    if (s_recording_enabled) {
+        ESP_ERROR_CHECK(app_storage_init_spiflash());
+    } else {
+        ESP_ERROR_CHECK(msc_storage_init_spiflash());
+    }
 
     ESP_LOGI(TAG, "Installing TinyUSB driver (%s)",
              s_recording_enabled ? "CDC only" : "CDC + MSC composite");
