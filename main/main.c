@@ -567,6 +567,24 @@ static void recording_set(bool enabled)
              s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
 }
 
+static void recording_set_and_restart(bool enabled)
+{
+    ESP_LOGI(TAG, "BOOT long-press: switching recording %s and restarting",
+             enabled ? "ON" : "OFF");
+
+    s_recording_enabled = enabled;
+    recording_persist_state(enabled);
+
+    if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        log_close_all();
+        xSemaphoreGive(s_log_mutex);
+    }
+
+    // Let the log line flush out before restarting into the new USB/storage mode.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
+}
+
 static void boot_button_task(void *arg)
 {
     (void)arg;
@@ -599,8 +617,7 @@ static void boot_button_task(void *arg)
         if (pressed && !toggled_this_press) {
             int64_t dur_ms = (now_us - pressed_us) / 1000;
             if (dur_ms >= hold_ms) {
-                ESP_LOGI(TAG, "BOOT long-press: toggling recording");
-                recording_set(!s_recording_enabled);
+                recording_set_and_restart(!s_recording_enabled);
                 toggled_this_press = true;
             }
         }
