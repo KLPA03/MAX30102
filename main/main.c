@@ -704,11 +704,9 @@ static void recording_toggle_on_boot(void)
     uint8_t schema_ver = 0;
     err = nvs_get_u8(h, "rec_ver", &schema_ver);
     if (err == ESP_ERR_NVS_NOT_FOUND || schema_ver != RECORDING_STATE_SCHEMA_VERSION) {
-#if CONFIG_APP_RECORDING_DEFAULT_ON
+        // Always come up recording ON after flashing/migration so the USB drive is not exposed
+        // immediately by a stale sdkconfig or old saved state.
         v = 1;
-#else
-        v = 0;
-#endif
         ESP_ERROR_CHECK(nvs_set_u8(h, "rec", v));
         ESP_ERROR_CHECK(nvs_set_u8(h, "rec_ver", RECORDING_STATE_SCHEMA_VERSION));
         ESP_ERROR_CHECK(nvs_commit(h));
