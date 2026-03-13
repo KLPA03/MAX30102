@@ -144,6 +144,7 @@ static int s_ws2812_led_count = 0;
 static bool i2c_probe_max3010x(void);
 static esp_err_t max30102_init_100hz(void);
 static esp_err_t max30102_get_unread_samples(uint8_t *unread);
+static esp_err_t app_storage_init_spiflash(void);
 
 static void i2c_bus_unlock_gpio(gpio_num_t sda, gpio_num_t scl)
 {
@@ -377,37 +378,53 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
         return ESP_OK;
     }
 
-    // Check if file exists and non-empty
-    FILE *fr = fopen(path, "r");
-    if (fr) {
-        int c = fgetc(fr);
-        fclose(fr);
-        if (c != EOF) {
-            *fp = fopen(path, "a");
-            return (*fp) ? ESP_OK : ESP_FAIL;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        // Check if file exists and non-empty
+        FILE *fr = fopen(path, "r");
+        if (fr) {
+            int c = fgetc(fr);
+            fclose(fr);
+            if (c != EOF) {
+                *fp = fopen(path, "a");
+                if (*fp) {
+                    return ESP_OK;
+                }
+            }
+        }
+
+        // Create new file with header
+        *fp = fopen(path, "w");
+        if (*fp) {
+            (void)setvbuf(*fp, NULL, _IONBF, 0);
+            const char *hdr =
+#if CONFIG_APP_LOG_UNITS_PICOAMPS
+                "time_hms,IR_pA,RED_pA\n";
+#else
+                "time_hms,IR,RED\n";
+#endif
+            if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
+                fclose(*fp);
+                *fp = NULL;
+                return ESP_FAIL;
+            }
+            fflush(*fp);
+            (void)fsync(fileno(*fp));
+            return ESP_OK;
+        }
+
+        if (!(s_recording_enabled && s_app_storage_ready) || attempt > 0) {
+            break;
+        }
+
+        ESP_LOGW(TAG, "CSV open failed on %s, remounting app storage (errno=%d)", path, errno);
+        esp_vfs_fat_spiflash_unmount_rw_wl(MSC_FAT_BASE_PATH, s_wl_handle);
+        s_wl_handle = WL_INVALID_HANDLE;
+        s_app_storage_ready = false;
+        if (app_storage_init_spiflash() != ESP_OK) {
+            break;
         }
     }
-
-    // Create new file with header
-    *fp = fopen(path, "w");
-    if (!*fp) {
-        return ESP_FAIL;
-    }
-    (void)setvbuf(*fp, NULL, _IONBF, 0);
-    const char *hdr =
-#if CONFIG_APP_LOG_UNITS_PICOAMPS
-        "time_hms,IR_pA,RED_pA\n";
-#else
-        "time_hms,IR,RED\n";
-#endif
-    if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
-        fclose(*fp);
-        *fp = NULL;
-        return ESP_FAIL;
-    }
-    fflush(*fp);
-    (void)fsync(fileno(*fp));
-    return ESP_OK;
+    return ESP_FAIL;
 }
 
 static void log_reopen_if_needed(void)
