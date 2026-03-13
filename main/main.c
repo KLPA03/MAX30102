@@ -558,41 +558,16 @@ static void recording_persist_state(bool enabled)
     nvs_close(h);
 }
 
-static void recording_set_and_restart(bool enabled, gpio_num_t btn_gpio)
+static void recording_set(bool enabled)
 {
-    ESP_LOGI(TAG, "BOOT button: switching recording %s and restarting",
+    ESP_LOGI(TAG, "BOOT button: switching recording %s",
              enabled ? "ON" : "OFF");
 
     s_recording_enabled = enabled;
     recording_persist_state(enabled);
-
-    if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        log_close_all();
-        xSemaphoreGive(s_log_mutex);
-    }
-
-    // GPIO0 is a strapping pin. Wait for the BOOT button to be released and stable high
-    // so the restart returns to the application instead of the ROM download mode.
-    const TickType_t stable_needed = pdMS_TO_TICKS(150);
-    const TickType_t timeout = pdMS_TO_TICKS(2000);
-    TickType_t stable_start = 0;
-    TickType_t start = xTaskGetTickCount();
-
-    while ((xTaskGetTickCount() - start) < timeout) {
-        bool released = (gpio_get_level(btn_gpio) != 0);
-        if (!released) {
-            stable_start = 0;
-        } else if (stable_start == 0) {
-            stable_start = xTaskGetTickCount();
-        } else if ((xTaskGetTickCount() - stable_start) >= stable_needed) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    // Let the final log lines flush out before restarting into the new USB/storage mode.
-    vTaskDelay(pdMS_TO_TICKS(100));
-    esp_restart();
+    apply_recording_mode();
+    ESP_LOGI(TAG, "Recording mode: %s (set via BOOT button)",
+             s_recording_enabled ? "ON (record-only, drive hidden)" : "OFF (drive exposed)");
 }
 
 static void boot_button_task(void *arg)
@@ -600,7 +575,7 @@ static void boot_button_task(void *arg)
     (void)arg;
 #if CONFIG_APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
     const gpio_num_t btn = (gpio_num_t)CONFIG_APP_BOOT_BUTTON_GPIO;
-    const int min_press_ms = 50;
+    const int min_press_ms = CONFIG_APP_BOOT_BUTTON_HOLD_MS;
 
     gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << (int)btn),
@@ -628,7 +603,7 @@ static void boot_button_task(void *arg)
             int64_t dur_ms = (now_us - pressed_us) / 1000;
             if (dur_ms >= min_press_ms) {
                 ESP_LOGI(TAG, "BOOT button press detected (%lld ms)", dur_ms);
-                recording_set_and_restart(!s_recording_enabled, btn);
+                recording_set(!s_recording_enabled);
             }
         }
 
@@ -775,7 +750,7 @@ static void recording_toggle_on_boot(void)
 #elif CONFIG_APP_RECORDING_TOGGLE_ON_RESET
              " (toggles on every boot)"
 #else
-             " (preserved across reset; use BOOT long-press to change)"
+             " (preserved across reset; use BOOT press/release to change)"
 #endif
     );
 }
@@ -1360,7 +1335,7 @@ void app_main(void)
     apply_recording_mode();
 
     // Start tasks regardless of initial mode. Logging is gated by `logging_allowed()`.
-    // This ensures that switching mode later (via BOOT long-press or RESET) immediately works.
+    // This ensures that switching mode later (via BOOT press/release or RESET) immediately works.
     s_sample_queue = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(log_sample_t));
     if (!s_sample_queue) {
         ESP_LOGE(TAG, "Failed to create sample queue");
@@ -1369,7 +1344,7 @@ void app_main(void)
         xTaskCreate(sensor_task, "max3010x", 4096, NULL, 10, &s_sensor_task);
     }
 
-    // Optional runtime toggle using BOOT long-press (no reset).
+    // Optional runtime toggle using BOOT press/release (no reset).
     xTaskCreate(boot_button_task, "boot_btn", 2048, NULL, 4, NULL);
 }
 

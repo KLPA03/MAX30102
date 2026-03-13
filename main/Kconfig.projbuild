@@ -230,12 +230,12 @@ menu "MAX3010x Logger"
                 GPIO connected to BOOT button (active-low).
 
         config APP_BOOT_BUTTON_HOLD_MS
-            int "BOOT long-press time (ms)"
-            range 100 3000
-            default 800
+            int "BOOT minimum press time (ms)"
+            range 20 3000
+            default 50
             depends on APP_RECORDING_TOGGLE_WITH_BOOT_BUTTON
             help
-                How long BOOT must be held to toggle recording.
+                Minimum BOOT press duration required to toggle recording on button release.
     endmenu
 
     config APP_USB_CDC_CONSOLE
