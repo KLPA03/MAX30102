@@ -401,9 +401,9 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
             (void)setvbuf(*fp, NULL, _IONBF, 0);
             const char *hdr =
 #if CONFIG_APP_LOG_UNITS_PICOAMPS
-                "time_hms,IR_pA,RED_pA\n";
+                "time_hms_text,IR_pA,RED_pA\n";
 #else
-                "time_hms,IR,RED\n";
+                "time_hms_text,IR,RED\n";
 #endif
             if (fwrite(hdr, 1, strlen(hdr), *fp) != strlen(hdr)) {
                 fclose(*fp);
@@ -445,6 +445,9 @@ static esp_err_t ensure_csv_header(FILE **fp, const char *path)
 
 static bool parse_csv_time_hms_ms(const char *token, uint64_t *out_ms)
 {
+    if (token[0] == 'T') {
+        token++;
+    }
     unsigned int h = 0;
     unsigned int m = 0;
     unsigned int s = 0;
@@ -898,7 +901,7 @@ static void sensor_task(void *arg)
                     uint32_t m_part = (total_s / 60U) % 60U;
                     uint32_t h_part = (total_s / 3600U);
                     char t_hms[32];
-                    (void)snprintf(t_hms, sizeof(t_hms), "%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
+                    (void)snprintf(t_hms, sizeof(t_hms), "T%02"PRIu32":%02"PRIu32":%02"PRIu32".%03"PRIu32,
                                    h_part, m_part, s_part, ms_part);
 
                     uint32_t ir_out = ir_ds;
