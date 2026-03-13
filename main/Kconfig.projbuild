@@ -184,10 +184,10 @@ menu "MAX3010x Logger"
             default y
             help
                 If enabled, CSV contains only:
-                - time_hms (HH:MM:SS)
+                - time_hms (HH:MM:SS.mmm)
                 - IR (or IR_pA)
                 - RED (or RED_pA)
-                Note: at 20 Hz you will see repeated timestamps within the same second.
+                Note: milliseconds are included so 20 Hz rows never repeat timestamps.
     endmenu
 
     menu "Recording mode"
